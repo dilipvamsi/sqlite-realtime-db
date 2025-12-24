@@ -176,7 +176,7 @@ make docker-build
 
 ## 📂 Project Structure
 
-```
+```bash
 .
 ├── clients/js          # TypeScript client source code
 ├── cmd/realtime        # Entry point (main.go)
@@ -217,8 +217,6 @@ We are actively working on making Real-Time SQLite a complete production-ready a
 
 ### 🔌 Client Enhancements
 *   **Offline Persistence:** Update the JS Client to persist the local cache to `IndexedDB` or `localStorage`, allowing apps to work offline and sync when online.
-*   **Optimistic UI:** Allow the client to update the UI immediately upon writing data, reverting only if the server rejects the change.
-*   **Presence API:** Built-in support for "Who is online", user cursors, and "User is typing..." events.
 
 ### ⚡ Performance & Engine
 *   **Full-Text Search (FTS5):** Expose SQLite's powerful FTS5 engine via the Query DSL for high-performance text search.
