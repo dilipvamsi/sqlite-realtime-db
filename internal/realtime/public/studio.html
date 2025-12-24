@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Real-Time Query Studio</title>
+    <script src="/realtime.js"></script>
+    <style>
+      :root {
+        --bg: #f9f9f9;
+        --panel-bg: #ffffff;
+        --border: #ddd;
+        --primary: #28a745;
+        --danger: #dc3545;
+        --code-bg: #1e1e1e;
+        --code-text: #d4d4d4;
+        --btn-sm-bg: #6c757d;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        background-color: var(--bg);
+        margin: 0;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        box-sizing: border-box;
+      }
+
+      h1 {
+        margin-top: 0;
+        text-align: center;
+        font-size: 1.5rem;
+        color: #333;
+      }
+
+      .layout {
+        display: flex;
+        flex: 1;
+        gap: 20px;
+        min-height: 0;
+      }
+
+      /* --- LEFT PANEL: CONTROLS --- */
+      .controls {
+        width: 350px;
+        display: flex;
+        flex-direction: column;
+        gap: 15px;
+        background: var(--panel-bg);
+        padding: 20px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+      }
+
+      .input-group {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+      .input-group.grow {
+        flex: 1;
+        min-height: 0;
+      }
+
+      .label-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      label {
+        font-weight: 600;
+        font-size: 0.9rem;
+        color: #555;
+      }
+
+      input,
+      textarea {
+        padding: 8px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+        font-size: 13px;
+        background: #fff;
+      }
+
+      textarea {
+        resize: none;
+        flex: 1;
+      }
+
+      .btn-row {
+        display: flex;
+        gap: 10px;
+        margin-top: auto;
+      }
+
+      button {
+        padding: 10px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-weight: bold;
+        color: white;
+        transition: opacity 0.2s;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      button:hover:not(:disabled) {
+        opacity: 0.9;
+      }
+
+      #btn-sub {
+        background-color: var(--primary);
+        flex: 1;
+      }
+      #btn-unsub {
+        background-color: var(--danger);
+        flex: 1;
+      }
+
+      .btn-sm {
+        padding: 2px 8px;
+        font-size: 11px;
+        background-color: var(--btn-sm-bg);
+        border-radius: 10px;
+        line-height: 1.2;
+      }
+
+      /* --- RIGHT PANEL: OUTPUT --- */
+      .output {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        min-width: 0;
+      }
+
+      .panel {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        background: var(--code-bg);
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid #333;
+      }
+
+      .panel-header {
+        background: #2d2d2d;
+        color: #fff;
+        padding: 8px 15px;
+        font-size: 0.85rem;
+        font-weight: bold;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        height: 35px;
+        box-sizing: border-box;
+      }
+
+      .log-content {
+        flex: 1;
+        padding: 15px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+        font-size: 12px;
+        color: var(--code-text);
+      }
+
+      .status-bar {
+        text-align: center;
+        padding: 8px;
+        border-radius: 4px;
+        margin-bottom: 10px;
+        font-weight: bold;
+        font-size: 0.9rem;
+      }
+      .connected {
+        background-color: #d4edda;
+        color: #155724;
+      }
+      .disconnected {
+        background-color: #f8d7da;
+        color: #721c24;
+      }
+
+      .badge {
+        background: #007bff;
+        color: white;
+        padding: 2px 6px;
+        border-radius: 10px;
+        font-size: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Real-Time Query Studio</h1>
+
+    <div id="status" class="status-bar disconnected">Disconnected</div>
+
+    <div class="layout">
+      <div class="controls">
+        <div class="input-group">
+          <label>Collection</label>
+          <!-- UPDATED: Default to 'realtime_order_demo' -->
+          <input
+            type="text"
+            id="inp-coll"
+            value="realtime_order_demo"
+            placeholder="e.g. realtime_order_demo"
+          />
+        </div>
+
+        <div class="input-group">
+          <label>Document ID (Optional)</label>
+          <input type="text" id="inp-docid" placeholder="e.g. ord_123" />
+        </div>
+
+        <div class="input-group grow">
+          <div class="label-row">
+            <label>Query DSL (JSON)</label>
+            <button id="btn-fmt" class="btn-sm" title="Prettify JSON">
+              Format
+            </button>
+          </div>
+          <textarea id="inp-query">
+{
+  "where": {
+    "$and": [
+      {
+        "field": "region",
+        "op": "==",
+        "value": "EU"
+      },
+      {
+        "field": "total",
+        "op": ">",
+        "value": 100
+      },
+      {
+        "field": "status",
+        "op": "==",
+        "value": "pending"
+      }
+    ]
+  },
+  "orderBy": [
+    {
+      "field": "total",
+      "direction": "desc"
+    }
+  ],
+  "limit": 50
+}</textarea
+          >
+        </div>
+
+        <div class="btn-row">
+          <button id="btn-sub">Subscribe</button>
+          <button id="btn-unsub" disabled>Unsubscribe</button>
+        </div>
+      </div>
+
+      <div class="output">
+        <div class="panel" style="flex: 2">
+          <div class="panel-header">
+            <span>LIVE DATA VIEW (Sync Array State)</span>
+            <span id="doc-count" class="badge">0 items</span>
+          </div>
+          <div id="out-data" class="log-content"></div>
+        </div>
+
+        <div class="panel" style="flex: 1">
+          <div class="panel-header">
+            <span>RAW EVENT STREAM</span>
+            <button id="btn-clear" class="btn-sm">Clear Logs</button>
+          </div>
+          <div id="out-events" class="log-content"></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      if (typeof RealTimeSQLite === "undefined") {
+        const msg =
+          "Error: RealTimeSQLite library not loaded.\nEnsure the server is running and serving /realtime.js";
+        alert(msg);
+        throw new Error(msg);
+      }
+
+      const inpColl = document.getElementById("inp-coll");
+      const inpDocId = document.getElementById("inp-docid");
+      const inpQuery = document.getElementById("inp-query");
+      const btnSub = document.getElementById("btn-sub");
+      const btnUnsub = document.getElementById("btn-unsub");
+      const btnClear = document.getElementById("btn-clear");
+      const btnFmt = document.getElementById("btn-fmt");
+
+      const outData = document.getElementById("out-data");
+      const outEvents = document.getElementById("out-events");
+      const statusDiv = document.getElementById("status");
+      const docCountBadge = document.getElementById("doc-count");
+
+      const client = new RealTimeSQLite(window.location.origin);
+      let activeSub = null;
+      let cleanupDataListener = null;
+
+      client.eventEmitter.on("connect", () => {
+        updateStatus(true);
+        logEvent("System", "WebSocket Connected.");
+      });
+      client.eventEmitter.on("disconnect", () => {
+        updateStatus(false);
+        logEvent("System", "WebSocket Disconnected.");
+      });
+      client.eventEmitter.on("error", () =>
+        logEvent("Error", "WebSocket Error occurred.")
+      );
+
+      client._connect();
+
+      function updateStatus(isConnected) {
+        if (isConnected) {
+          statusDiv.textContent = "CONNECTED";
+          statusDiv.className = "status-bar connected";
+        } else {
+          statusDiv.textContent = "DISCONNECTED";
+          statusDiv.className = "status-bar disconnected";
+        }
+      }
+
+  function logEvent(source, message, opType = null) {
+    const time = new Date().toISOString().split('T')[1].slice(0, -1);
+    const div = document.createElement('div');
+    div.style.borderBottom = "1px solid #333";
+    div.style.padding = "4px 0";
+    div.style.fontFamily = "monospace";
+
+    // Color code based on operation
+    let color = "#d4d4d4"; // Default text
+    let badge = "";
+
+    if (opType === 'INSERT') {
+        color = "#a6e22e"; // Green
+        badge = "➕ ";
+    } else if (opType === 'UPDATE') {
+        color = "#f1c40f"; // Yellow
+        badge = "✏️ ";
+    } else if (opType === 'REMOVE') {
+        color = "#ff6b6b"; // Red
+        badge = "🚫 "; // Visual cue that it's gone
+    } else if (opType === 'DELETE') {
+        color = "#ff4444"; // Darker Red
+        badge = "🗑️ ";
+    }
+
+    div.innerHTML = `<span style="color:#666">[${time}]</span> <span style="color:${color}">${badge}${message}</span>`;
+    
+    outEvents.appendChild(div);
+    outEvents.scrollTop = outEvents.scrollHeight;
+  }
+      function renderData(list, isLoading) {
+        docCountBadge.textContent = `${list.length} items`;
+
+        if (isLoading) {
+          outData.textContent = "Loading snapshot...";
+          return;
+        }
+
+        if (list.length === 0) {
+          outData.textContent = "(Empty Collection or No Match)";
+          return;
+        }
+
+        outData.textContent = JSON.stringify(list, null, 2);
+      }
+
+      btnFmt.addEventListener("click", () => {
+        try {
+          const val = inpQuery.value.trim();
+          if (!val) return;
+          const obj = JSON.parse(val);
+          inpQuery.value = JSON.stringify(obj, null, 2);
+        } catch (e) {
+          alert("Invalid JSON: " + e.message);
+        }
+      });
+
+      btnClear.addEventListener("click", () => {
+        outEvents.textContent = "";
+      });
+
+      btnSub.addEventListener("click", () => {
+        const collection = inpColl.value.trim();
+        const docId = inpDocId.value.trim();
+        let query = null;
+
+        const rawQuery = inpQuery.value.trim();
+        if (rawQuery) {
+          try {
+            query = JSON.parse(rawQuery);
+          } catch (e) {
+            alert("Invalid JSON in Query Field!");
+            return;
+          }
+        }
+
+        if (activeSub) {
+          if (cleanupDataListener) cleanupDataListener();
+          activeSub.unsubscribe();
+        }
+
+        activeSub = client.subscribe({
+          collection,
+          docId: docId || undefined,
+          query: query || undefined,
+        });
+
+        logEvent(
+          "System",
+          `Subscribed to '${collection}' (ID: ${activeSub.id})`
+        );
+
+        cleanupDataListener = activeSub.subscribeToData(
+          (list, map, isLoading) => {
+            renderData(list, isLoading);
+          }
+        );
+
+        activeSub.on((msg) => {
+          if (msg.type === "realtime_update") {
+            const { operation, docId } = msg.payload;
+            logEvent("Event", `${operation} -> ${docId}`, operation);
+          } else if (msg.type === "subscription_error") {
+            logEvent("Error", msg.error);
+            alert("Subscription Error: " + msg.error);
+          }
+        });
+
+        btnSub.disabled = true;
+        btnUnsub.disabled = false;
+        inpColl.disabled = true;
+        inpDocId.disabled = true;
+        inpQuery.disabled = true;
+      });
+
+      btnUnsub.addEventListener("click", () => {
+        if (activeSub) {
+          if (cleanupDataListener) cleanupDataListener();
+          activeSub.unsubscribe();
+          logEvent("System", `Unsubscribed ID: ${activeSub.id}`);
+          activeSub = null;
+        }
+
+        btnSub.disabled = false;
+        btnUnsub.disabled = true;
+        inpColl.disabled = false;
+        inpDocId.disabled = false;
+        inpQuery.disabled = false;
+
+        outData.textContent = "(Not Subscribed)";
+        docCountBadge.textContent = "0 items";
+      });
+    </script>
+  </body>
+</html>

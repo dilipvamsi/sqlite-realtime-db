@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Real-Time SQLite API Documentation</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        line-height: 1.6;
+        color: #333;
+        background-color: #fdfdfd;
+        margin: 0;
+        padding: 0;
+      }
+      .container {
+        max-width: 900px;
+        margin: 20px auto;
+        padding: 0 20px;
+      }
+      h1,
+      h2,
+      h3 {
+        color: #111;
+        border-bottom: 1px solid #eee;
+        padding-bottom: 10px;
+      }
+      .header-actions {
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 15px;
+        margin-bottom: 30px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid #eee;
+      }
+      .title-section {
+        margin-right: auto;
+      }
+      .title-section h1 {
+        border-bottom: none;
+        margin-bottom: 0;
+        padding-bottom: 0;
+      }
+      .btn {
+        display: inline-block;
+        color: white;
+        padding: 10px 15px;
+        text-decoration: none;
+        border-radius: 5px;
+        font-weight: bold;
+        font-size: 0.9em;
+        transition: background-color 0.2s;
+      }
+      .btn-studio {
+        background-color: #28a745;
+      }
+      .btn-studio:hover {
+        background-color: #218838;
+      }
+      .btn-simulator {
+        background-color: #17a2b8;
+      }
+      .btn-simulator:hover {
+        background-color: #138496;
+      }
+      code {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo,
+          monospace;
+        background-color: #f0f0f0;
+        padding: 3px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+      pre {
+        background-color: #f6f8fa;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        padding: 15px;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+      .endpoint {
+        background-color: #fff;
+        border: 1px solid #e0e0e0;
+        border-radius: 5px;
+        padding: 15px;
+        margin-bottom: 20px;
+      }
+      .method {
+        font-weight: bold;
+        border-radius: 3px;
+        padding: 3px 8px;
+        color: white;
+        font-size: 0.9em;
+      }
+      .post {
+        background-color: #4caf50;
+      }
+      .get {
+        background-color: #2196f3;
+      }
+      .patch {
+        background-color: #ff9800;
+      }
+      .delete {
+        background-color: #f44336;
+      }
+      .put {
+        background-color: #673ab7;
+      }
+      .note {
+        background-color: #fff3cd;
+        border: 1px solid #ffeeba;
+        color: #856404;
+        padding: 10px;
+        border-radius: 5px;
+        margin-top: 10px;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header-actions">
+        <div class="title-section">
+          <h1>Real-Time SQLite API</h1>
+        </div>
+        <a href="/studio" class="btn btn-studio" target="_blank"
+          >Open Real-Time Studio &rarr;</a
+        >
+        <a href="/simulator" class="btn btn-simulator" target="_blank"
+          >Open Traffic Simulator &rarr;</a
+        >
+      </div>
+
+      <p>
+        A simple, high-performance real-time database layer on top of SQLite.
+        All REST API endpoints are prefixed with <code>/db</code>.
+      </p>
+
+      <h2>System Health</h2>
+      <div class="endpoint">
+        <h4><span class="method get">GET</span> <code>/health</code></h4>
+        <p>Checks the health of the server and its database connection.</p>
+        <pre><code>curl http://localhost:17050/health</code></pre>
+        <p><strong>Success Response (200 OK):</strong></p>
+        <pre><code>{ "status": "ok", "database": "connected" }</code></pre>
+      </div>
+
+      <h2>REST API</h2>
+
+      <h3>Collections</h3>
+      <div class="endpoint">
+        <h4>
+          <span class="method get">GET</span> <code>/db/collections</code>
+        </h4>
+        <p>Lists all user-created collections.</p>
+        <pre><code>curl http://localhost:17050/db/collections</code></pre>
+        <p>
+          <strong>Example Response:</strong>
+          <code>["realtime_order_demo", "users"]</code>
+        </p>
+      </div>
+      <div class="endpoint">
+        <h4>
+          <span class="method post">POST</span> <code>/db/collections</code>
+        </h4>
+        <p>Creates a new collection (table).</p>
+        <pre><code>curl -X POST http://localhost:17050/db/collections -d '{"name": "realtime_order_demo"}'</code></pre>
+      </div>
+      <div class="endpoint">
+        <h4>
+          <span class="method delete">DELETE</span> <code>/db/collections</code>
+        </h4>
+        <p>Deletes a collection and all its data.</p>
+        <pre><code>curl -X DELETE http://localhost:17050/db/collections -d '{"name": "realtime_order_demo"}'</code></pre>
+      </div>
+
+      <h3>Indexes</h3>
+      <div class="endpoint">
+        <h4>
+          <span class="method post">POST</span>
+          <code>/db/indexes/{collectionName}</code>
+        </h4>
+        <p>
+          Creates an index on a JSON field for faster querying. Essential for
+          <code>total</code> or <code>status</code> filters.
+        </p>
+        <pre><code>curl -X POST http://localhost:17050/db/indexes/realtime_order_demo \
+  -d '{"name": "idx_total", "fields": ["total"]}'</code></pre>
+      </div>
+
+      <h3>Documents</h3>
+      <div class="endpoint">
+        <h4>
+          <span class="method put">PUT</span>
+          <code>/db/data/{collection}/{docId}</code>
+        </h4>
+        <p>
+          Creates a new document or fully replaces an existing one (Upsert).
+        </p>
+        <pre><code>curl -X PUT http://localhost:17050/db/data/realtime_order_demo/ord_100 \
+  -d '{"status": "pending", "total": 150, "region": "US"}'</code></pre>
+      </div>
+      <div class="endpoint">
+        <h4>
+          <span class="method get">GET</span>
+          <code>/db/data/{collection}/{docId}</code>
+        </h4>
+        <p>Retrieves a single document.</p>
+        <pre><code>curl http://localhost:17050/db/data/realtime_order_demo/ord_100</code></pre>
+      </div>
+      <div class="endpoint">
+        <h4>
+          <span class="method patch">PATCH</span>
+          <code>/db/data/{collection}/{docId}</code>
+        </h4>
+        <p>Partially updates a document using JSON Patch (RFC 7396).</p>
+        <pre><code>curl -X PATCH http://localhost:17050/db/data/realtime_order_demo/ord_100 \
+  -d '{"status": "shipped", "shippedAt": "2025-10-01"}'</code></pre>
+      </div>
+      <div class="endpoint">
+        <h4>
+          <span class="method delete">DELETE</span>
+          <code>/db/data/{collection}/{docId}</code>
+        </h4>
+        <p>Deletes a document.</p>
+        <pre><code>curl -X DELETE http://localhost:17050/db/data/realtime_order_demo/ord_100</code></pre>
+      </div>
+
+      <h3>Querying</h3>
+      <div class="endpoint">
+        <h4>
+          <span class="method post">POST</span>
+          <code>/db/query/{collectionName}</code>
+        </h4>
+        <p>
+          Executes a read-only query. Returns an array of document wrappers
+          <code>{ id, data }</code>.
+        </p>
+
+        <h5>Example: VIP Orders (Complex Logic)</h5>
+        <p>
+          Find orders where Region is 'EU' <strong>AND</strong> Total is greater
+          than 100, sorted by Total descending.
+        </p>
+        <pre><code>curl -X POST http://localhost:17050/db/query/realtime_order_demo \
+  -H "Content-Type: application/json" \
+  -d '{
+    "where": {
+      "$and": [
+        { "field": "region", "op": "==", "value": "EU" },
+        { "field": "total", "op": ">", "value": 100 }
+      ]
+    },
+    "orderBy": [
+      { "field": "total", "direction": "desc" }
+    ],
+    "limit": 20
+  }'</code></pre>
+
+        <p><strong>Example Response:</strong></p>
+        <pre><code>[
+  {
+    "id": "ord_200",
+    "data": { "status": "pending", "total": 500, "region": "EU" }
+  },
+  {
+    "id": "ord_350",
+    "data": { "status": "shipped", "total": 120, "region": "EU" }
+  }
+]</code></pre>
+      </div>
+
+      <h2>WebSocket API (Real-Time Subscriptions)</h2>
+      <p>
+        Connect to <code>ws://localhost:17050/ws</code> to receive live updates.
+      </p>
+      <div class="note">
+        <strong>Client Library:</strong> A JavaScript client library is
+        available at <code>/realtime.js</code>. It handles reconnection, query
+        syncing, and state management automatically.
+      </div>
+
+      <h3>Message Format</h3>
+      <p>Send: <code>{"type": "subscribe", "subscription": {...}}</code></p>
+
+      <h4>1. Subscribe to Collection (Audit Log)</h4>
+      <pre><code>{
+  "type": "subscribe",
+  "subscription": {
+    "subscriptionId": "sub-1",
+    "collection": "realtime_order_demo"
+  }
+}</code></pre>
+
+      <h4>2. Subscribe to Single Document (Tracker)</h4>
+      <pre><code>{
+  "type": "subscribe",
+  "subscription": {
+    "subscriptionId": "sub-2",
+    "collection": "realtime_order_demo",
+    "docId": "ord_100"
+  }
+}</code></pre>
+
+      <h4>3. Subscribe with Query (Live Dashboard)</h4>
+      <p>Get live updates for 'pending' orders.</p>
+      <pre><code>{
+  "type": "subscribe",
+  "subscription": {
+    "subscriptionId": "sub-3",
+    "collection": "realtime_order_demo",
+    "query": {
+      "where": {
+        "field": "status",
+        "op": "==",
+        "value": "pending"
+      }
+    }
+  }
+}</code></pre>
+
+      <h3>Server Events</h3>
+      <p>The server sends the following event types:</p>
+      <ul>
+        <li>
+          <code>initial_data_batch</code>: Existing data sent immediately after
+          subscribing.
+        </li>
+        <li><code>initial_data_complete</code>: Signals end of history.</li>
+        <li><code>realtime_update</code>: A live change happened.</li>
+      </ul>
+
+      <h4>Real-Time Update Payload</h4>
+      <pre><code>{
+  "type": "realtime_update",
+  "payload": {
+    "operation": "INSERT",  // Options: INSERT, UPDATE, DELETE, REMOVE
+    "collection": "realtime_order_demo",
+    "docId": "ord_999",
+    "data": { "status": "pending", "total": 50 }
+  }
+}</code></pre>
+
+      <div class="note">
+        <strong
+          >Understanding <code>REMOVE</code> vs <code>DELETE</code>:</strong
+        ><br />
+        <ul>
+          <li>
+            <strong>DELETE:</strong> The document was permanently deleted from
+            the database.
+          </li>
+          <li>
+            <strong>REMOVE:</strong> The document still exists, but it was
+            updated such that it
+            <strong>no longer matches your query</strong> (e.g., status changed
+            from 'pending' to 'shipped'). It should be removed from the client's
+            view.
+          </li>
+        </ul>
+      </div>
+    </div>
+  </body>
+</html>

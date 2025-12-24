@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Real-Time Traffic Simulator</title>
+    <script src="/realtime.js"></script>
+    <style>
+      :root {
+        --bg: #121212;
+        --panel: #1e1e1e;
+        --text: #e0e0e0;
+        --accent: #bb86fc;
+        --success: #03dac6;
+        --warning: #cf6679;
+        --info: #3700b3;
+      }
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background-color: var(--bg);
+        color: var(--text);
+        margin: 0;
+        padding: 20px;
+        height: 100vh;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+      }
+      h1 {
+        margin-top: 0;
+        color: var(--accent);
+        text-align: center;
+      }
+
+      .dashboard {
+        display: flex;
+        gap: 20px;
+        flex: 1;
+        min-height: 0;
+      }
+
+      .controls {
+        width: 300px;
+        background: var(--panel);
+        padding: 20px;
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        border: 1px solid #333;
+      }
+
+      .log-panel {
+        flex: 1;
+        background: #000;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 15px;
+        overflow-y: auto;
+        font-family: "Consolas", monospace;
+        font-size: 13px;
+        display: flex;
+        flex-direction: column-reverse;
+      }
+
+      button {
+        padding: 12px;
+        border: none;
+        border-radius: 4px;
+        font-weight: bold;
+        cursor: pointer;
+        font-size: 14px;
+        text-transform: uppercase;
+        transition: filter 0.2s;
+      }
+      button:hover {
+        filter: brightness(1.2);
+      }
+      button:disabled {
+        filter: grayscale(1);
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+
+      .btn-start {
+        background-color: var(--success);
+        color: #000;
+      }
+      .btn-stop {
+        background-color: var(--warning);
+        color: #000;
+      }
+      .btn-reset {
+        background-color: var(--info);
+        color: #fff;
+        margin-top: auto;
+      }
+
+      .stat-box {
+        background: rgba(255, 255, 255, 0.05);
+        padding: 10px;
+        border-radius: 4px;
+        text-align: center;
+      }
+      .stat-val {
+        font-size: 24px;
+        font-weight: bold;
+        color: var(--success);
+      }
+      .stat-label {
+        font-size: 12px;
+        color: #888;
+      }
+
+      .log-entry {
+        margin-bottom: 4px;
+        border-bottom: 1px solid #222;
+        padding-bottom: 2px;
+      }
+      .log-time {
+        color: #666;
+        margin-right: 10px;
+      }
+      .op-insert {
+        color: var(--success);
+      }
+      .op-update {
+        color: #f1c40f;
+      }
+      .op-delete {
+        color: var(--warning);
+      }
+      .op-system {
+        color: #888;
+        font-style: italic;
+      }
+
+      input[type="range"] {
+        width: 100%;
+        margin-top: 10px;
+      }
+      label {
+        font-size: 14px;
+        font-weight: bold;
+        color: #bbb;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>🤖 Live Traffic Simulator</h1>
+
+    <div class="dashboard">
+      <!-- Controls -->
+      <div class="controls">
+        <div class="stat-box">
+          <div class="stat-val" id="active-count">0</div>
+          <div class="stat-label">Tracked Orders in Memory</div>
+        </div>
+
+        <div>
+          <label>Simulation Speed (<span id="speed-label">500</span>ms)</label>
+          <input
+            type="range"
+            id="speed-slider"
+            min="100"
+            max="2000"
+            step="100"
+            value="500"
+          />
+        </div>
+
+        <button id="btn-start" class="btn-start">▶ Start Simulation</button>
+        <button id="btn-stop" class="btn-stop" disabled>⏹ Stop</button>
+
+        <hr style="width: 100%; border-color: #333" />
+
+        <button id="btn-setup" class="btn-reset">🛠 Reset DB Schema</button>
+      </div>
+
+      <!-- Logs -->
+      <div id="log-container" class="log-panel">
+        <div class="log-entry">
+          <span class="log-time">System:</span> Ready. Click Start to begin.
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // 1. Setup Client
+      const client = new RealTimeSQLite(window.location.origin);
+      const COLLECTION_NAME = "realtime_order_demo";
+
+      // 2. Simulation State
+      let timer = null;
+      let activeIds = [];
+
+      // Constants for Random Generation
+      const REGIONS = ["US", "EU", "APAC"];
+      const STATUSES = [
+        "draft",
+        "pending",
+        "shipped",
+        "delivered",
+        "cancelled",
+      ];
+      const NAMES = [
+        "Alice",
+        "Bob",
+        "Charlie",
+        "Corp Inc",
+        "Logistics Ltd",
+        "TestUser",
+      ];
+
+      // UI Elements
+      const btnStart = document.getElementById("btn-start");
+      const btnStop = document.getElementById("btn-stop");
+      const btnSetup = document.getElementById("btn-setup");
+      const slider = document.getElementById("speed-slider");
+      const speedLabel = document.getElementById("speed-label");
+      const countDisplay = document.getElementById("active-count");
+      const logContainer = document.getElementById("log-container");
+
+      // --- Helpers ---
+
+      function randomInt(min, max) {
+        return Math.floor(Math.random() * (max - min + 1) + min);
+      }
+      function randomItem(arr) {
+        return arr[Math.floor(Math.random() * arr.length)];
+      }
+
+      function log(op, text) {
+        const div = document.createElement("div");
+        div.className = "log-entry";
+        const time = new Date().toISOString().split("T")[1].split(".")[0];
+
+        let colorClass = "";
+        if (op === "INSERT") colorClass = "op-insert";
+        if (op === "UPDATE") colorClass = "op-update";
+        if (op === "DELETE") colorClass = "op-delete";
+        if (op === "SYSTEM") colorClass = "op-system";
+
+        div.innerHTML = `<span class="log-time">[${time}]</span> <strong class="${colorClass}">${op}</strong>: ${text}`;
+        logContainer.insertBefore(div, logContainer.firstChild);
+        if (logContainer.children.length > 50)
+          logContainer.removeChild(logContainer.lastChild);
+      }
+
+      // --- Logic ---
+
+      // Ensures collection and indexes exist without deleting data
+      async function ensureSchema() {
+        try {
+          // The server uses "CREATE IF NOT EXISTS", so these are safe to call repeatedly
+          await client.createCollection(COLLECTION_NAME);
+          await client.createIndex(COLLECTION_NAME, {
+            name: "idx_status",
+            fields: ["status"],
+          });
+          await client.createIndex(COLLECTION_NAME, {
+            name: "idx_total",
+            fields: ["total"],
+          });
+          await client.createIndex(COLLECTION_NAME, {
+            name: "idx_region",
+            fields: ["region"],
+          });
+          log("SYSTEM", `Schema verified for '${COLLECTION_NAME}'`);
+        } catch (e) {
+          console.warn("Schema check warning:", e);
+        }
+      }
+
+      async function tick() {
+        try {
+          const rand = Math.random();
+
+          // 40% Create, 40% Update, 20% Delete
+          if (activeIds.length === 0 || rand < 0.4) {
+            // --- CREATE ---
+            const id = `ord_${Date.now()}_${randomInt(100, 999)}`;
+            const order = {
+              status: randomItem(["draft", "pending"]),
+              total: randomInt(10, 1000),
+              region: randomItem(REGIONS),
+              customerName: randomItem(NAMES),
+            };
+
+            await client.setDocument(COLLECTION_NAME, id, order);
+            activeIds.push(id);
+            log(
+              "INSERT",
+              `Created <b>#${id}</b> (${order.region}, $${order.total})`
+            );
+          } else if (rand < 0.8) {
+            // --- UPDATE ---
+            const id = randomItem(activeIds);
+            const updateType = Math.random();
+
+            if (updateType < 0.5) {
+              const newStatus = randomItem(STATUSES);
+              await client.updateDocument(COLLECTION_NAME, id, {
+                status: newStatus,
+              });
+              log("UPDATE", `Changed <b>#${id}</b> status to '${newStatus}'`);
+            } else {
+              const newTotal = randomInt(10, 2000);
+              await client.updateDocument(COLLECTION_NAME, id, {
+                total: newTotal,
+              });
+              log("UPDATE", `Changed <b>#${id}</b> total to $${newTotal}`);
+            }
+          } else {
+            // --- DELETE ---
+            const index = randomInt(0, activeIds.length - 1);
+            const id = activeIds[index];
+            await client.deleteDocument(COLLECTION_NAME, id);
+            activeIds.splice(index, 1);
+            log("DELETE", `Removed <b>#${id}</b>`);
+          }
+          countDisplay.textContent = activeIds.length;
+        } catch (err) {
+          log("ERROR", err.message);
+        }
+      }
+
+      // --- Event Handlers ---
+
+      slider.addEventListener("input", (e) => {
+        speedLabel.textContent = e.target.value;
+        if (timer) {
+          clearInterval(timer);
+          timer = setInterval(tick, parseInt(e.target.value));
+        }
+      });
+
+      btnStart.addEventListener("click", async () => {
+        if (timer) return;
+
+        // 1. Ensure DB exists before starting
+        btnStart.disabled = true;
+        await ensureSchema();
+
+        // 2. Start Loop
+        const ms = parseInt(slider.value);
+        timer = setInterval(tick, ms);
+        btnStop.disabled = false;
+        log("SYSTEM", `Simulation started (${ms}ms interval)`);
+      });
+
+      btnStop.addEventListener("click", () => {
+        if (!timer) return;
+        clearInterval(timer);
+        timer = null;
+        btnStart.disabled = false;
+        btnStop.disabled = true;
+        log("SYSTEM", `Simulation paused.`);
+      });
+
+      btnSetup.addEventListener("click", async () => {
+        if (
+          !confirm(
+            `⚠️ Resetting will DELETE all data in '${COLLECTION_NAME}'. Continue?`
+          )
+        )
+          return;
+
+        log("SYSTEM", "Resetting database schema...");
+        try {
+          await client.deleteCollection(COLLECTION_NAME).catch(() => {});
+          activeIds = []; // Clear local memory
+          countDisplay.textContent = 0;
+
+          await ensureSchema(); // Recreate tables/indexes
+          log("SYSTEM", "Database reset complete.");
+        } catch (e) {
+          alert("Setup failed: " + e.message);
+        }
+      });
+    </script>
+  </body>
+</html>

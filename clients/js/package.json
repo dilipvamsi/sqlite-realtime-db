@@ -1,0 +1,12 @@
+{
+  "name": "realtimesqlite-client",
+  "version": "1.0.0",
+  "description": "JS/TS client for the Real-Time SQLite server.",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "author": "dilipvamsi",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}
