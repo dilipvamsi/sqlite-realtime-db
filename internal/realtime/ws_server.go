@@ -56,11 +56,12 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 
 	client := &Client{
-		hub:          hub,
-		conn:         conn,
-		send:         make(chan []byte, 256),                     // Buffered channel to prevent blocking the hub
-		sendPrepared: make(chan *websocket.PreparedMessage, 256), // Buffered channel for prepared messages
-		topics:       make(map[string]bool),
+		hub:           hub,
+		conn:          conn,
+		send:          make(chan []byte, 256),                     // Buffered channel to prevent blocking the hub
+		sendPrepared:  make(chan *websocket.PreparedMessage, 256), // Buffered channel for prepared messages
+		topics:        make(map[string]bool),
+		subscriptions: make(SubscriptionTopics),
 	}
 	client.hub.register <- client
 
@@ -228,6 +229,7 @@ func (c *Client) handleSubscribe(db *sql.DB, sub Subscription) {
 	}
 
 	c.topics[topic] = true
+	c.subscriptions[sub.ID] = topic
 	log.Printf("Client %p subscribed to topic: %s", c, topic)
 	go c.fetchInitialData(db, sub)
 }

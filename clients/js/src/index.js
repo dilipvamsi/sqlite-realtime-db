@@ -316,6 +316,10 @@
        * @type {Map<string, { payload: object, sub: Subscription, socketId: WebSocket | null }>}
        */
       this.subscriptions = new Map();
+      /**
+       * @type {Map<string, Set<string>>}
+       */
+      this.topicSubscriptions = new Map();
 
       this.eventEmitter = new EventEmitter();
       this.shouldBeConnected = false;
@@ -485,40 +489,55 @@
         const wasConnected = this.shouldBeConnected;
         this.websocket = null;
         this.eventEmitter.emit("disconnect");
+        // Clear topic map on disconnect as server will re-assign on reconnect
+        this.topicSubscriptions.clear();
         // Trigger reconnect only if we didn't explicitly call .disconnect()
         if (wasConnected) this._handleReconnect();
       };
 
       this.websocket.onerror = (e) => this.eventEmitter.emit("error", e);
 
-      //   this.websocket.onmessage = (e) => {
-      //     try {
-      //       const msg = JSON.parse(e.data);
-      //       this.eventEmitter.emit("message", msg);
-      //       if (msg.subscriptionId)
-      //         this.eventEmitter.emit(`subscription:${msg.subscriptionId}`, msg);
-      //     } catch (err) {
-      //       console.error("WS Parse Error", err);
-      //     }
-      //   };
-      // }
-
       this.websocket.onmessage = (e) => {
         // The server batches messages separated by newlines (\n).
         // We must split them to parse individual JSON objects.
         const messages = e.data.split('\n');
-
         for (const raw of messages) {
-          if (!raw.trim()) continue; // Skip empty lines
+          if (!raw.trim()) continue;
           try {
             const msg = JSON.parse(raw);
             this.eventEmitter.emit("message", msg);
+
+            // 1. Handle Subscription ACK (Map Topic -> SubIDs)
+            if (msg.type === "subscribe_ack") {
+              const { subscriptionId, topic } = msg;
+              if (!this.topicSubscriptions.has(topic)) {
+                this.topicSubscriptions.set(topic, new Set());
+              }
+              this.topicSubscriptions.get(topic).add(subscriptionId);
+              continue; // ACK handled
+            }
+
+            // 2. Handle RealTime Updates (Fan-out by Topic)
+            if (msg.type === "realtime_update") {
+              const topic = msg.topic;
+              const subIds = this.topicSubscriptions.get(topic);
+              if (subIds) {
+                subIds.forEach(id => {
+                  // Inject SubID locally for the Subscription handler
+                  // We must clone msg to avoid modifying it for other listeners if we mutated deeply (we don't here)
+                  // but a shallow copy is safer.
+                  const localMsg = { ...msg, subscriptionId: id };
+                  this.eventEmitter.emit(`subscription:${id}`, localMsg);
+                });
+              }
+              continue;
+            }
+
+            // 3. Handle Initial Data / Errors (Direct routing via subscriptionId)
             if (msg.subscriptionId) {
               this.eventEmitter.emit(`subscription:${msg.subscriptionId}`, msg);
             }
-          } catch (err) {
-            console.error("WS Parse Error", err, "Raw data:", raw);
-          }
+          } catch (err) { console.error("WS Parse Error", err); }
         }
       };
     }
@@ -543,7 +562,7 @@
      * @returns {Subscription}
      */
     subscribe({ collection, docId, query }) {
-      const subscriptionId = `${Date.now()}_${Math.random()
+      const subscriptionId = `${collection}_${Date.now()}_${Math.random()
         .toString(36)
         .slice(2, 11)}`;
       const payload = {
@@ -580,6 +599,18 @@
     unsubscribe(subscriptionId) {
       const subInfo = this.subscriptions.get(subscriptionId);
       if (!subInfo) return;
+
+      // Clean up Topic Map
+      // We iterate because we don't store SubID->Topic mapping directly in this simple impl.
+      // Optimally, Subscription class could know its topic.
+      for (const [topic, subscriptionSet] of this.topicSubscriptions.entries()) {
+        if (subscriptionSet.delete(subscriptionId)) {
+          if (subscriptionSet.size === 0) {
+            this.topicSubscriptions.delete(topic);
+          }
+          break;
+        }
+      }
 
       const payload = {
         type: "unsubscribe",

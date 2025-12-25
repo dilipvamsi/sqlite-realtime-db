@@ -75,18 +75,11 @@ type SubscribeAckPayload struct {
 	Topic          string    `json:"topic"`
 }
 
-// RealTimeUpdatePayload is the structured message for broadcasting a live event.
-type RealTimeUpdatePayload struct {
-	SubscriptionID string         `json:"subscriptionId"`
-	Type           EventType      `json:"type"`
-	Event          *RealTimeEvent `json:"payload"`
-}
-
 // CachedRealTimeUpdatePayload is the structured message for broadcasting by caching event.
 type CachedRealTimeUpdatePayload struct {
-	SubscriptionID string          `json:"subscriptionId"`
-	Type           EventType       `json:"type"`
-	Event          json.RawMessage `json:"payload"` // Use RawMessage!
+	Topic string          `json:"topic"`
+	Type  EventType       `json:"type"`
+	Event json.RawMessage `json:"payload"` // Use RawMessage!
 }
 
 // Document represents a single document with its ID and data.

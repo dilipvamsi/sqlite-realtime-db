@@ -13,6 +13,9 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Subscription to topic map
+type SubscriptionTopics map[string]string
+
 // A map of clients to their SINGLE subscription ID for this feed.
 type ClientSubMap map[*Client]string
 
@@ -47,7 +50,8 @@ type Client struct {
 	send         chan []byte
 	sendPrepared chan *websocket.PreparedMessage
 	// A set of topic strings (e.g., "coll:posts", "doc:posts:doc123") for efficient cleanup.
-	topics map[string]bool
+	topics        map[string]bool
+	subscriptions SubscriptionTopics
 }
 
 // A helper struct for the dispatch list inside the run loop
@@ -171,55 +175,94 @@ func fillRemoveEvent(event *RealTimeEvent) *RealTimeEvent {
 	return removeEvent
 }
 
+// dispatchEventsToClients groups messages by Topic to leverage WebSocket PreparedMessages.
+// It also caches the marshaled Event JSON to avoid redundant CPU work when multiple
+// topics (e.g. distinct queries) are triggered by the same underlying database event.
 func dispatchEventsToClients(dispatchList []dispatch) {
-	if len(dispatchList) > 0 {
+	if len(dispatchList) == 0 {
+		return
+	}
 
-		// OPTIMIZATION: Event Cache
-		// We map the *Pointer* of the event to its marshaled JSON bytes.
-		// This handles the Main Event AND any shared Synthetic Events (e.g., 50 clients
-		// getting the exact same REMOVE event) efficiently.
-		// We typically expect 1 or 2 unique events per batch, so we init with small capacity.
-		eventCache := make(map[*RealTimeEvent]json.RawMessage, 2)
+	// 1. Group clients by Topic.
+	// In the current architecture, a specific Topic (e.g. "query:users:123") in a single
+	// broadcast cycle corresponds to exactly one Event (either the Main Insert/Update or a Synthetic Remove).
+	// Therefore, we can safely group by Topic to prepare the frame once.
+	type topicGroup struct {
+		event   *RealTimeEvent
+		clients []*Client
+	}
 
-		// Pre-seed the main event if desired, or let the loop handle it lazily.
-		// Doing it lazily simplifies the loop logic.
-		for _, dispatch := range dispatchList {
-			// 1. Resolve Event Payload (Lazy Loading / Caching)
-			eventPayload, exists := eventCache[dispatch.event]
-			if !exists {
-				// This is the first time we've seen this specific event object in this batch.
-				// Marshal it and cache the result.
-				eventBytes, err := json.Marshal(dispatch.event)
-				if err != nil {
-					log.Printf("Error marshaling event for dispatch: %v", err)
-					continue
-				}
-				eventPayload = json.RawMessage(eventBytes) // Zero-copy cast
-				eventCache[dispatch.event] = eventPayload
+	// Map: TopicString -> Group
+	// We use a map to deduplicate work. Ideally, we'd pool this map too if GC is tight,
+	// but for now, the allocation is worth the CPU savings on framing.
+	groups := make(map[string]*topicGroup)
+
+	for _, d := range dispatchList {
+		topic := d.client.subscriptions[d.subID]
+		g, exists := groups[topic]
+		if !exists {
+			groups[topic] = &topicGroup{
+				event:   d.event,
+				clients: []*Client{d.client},
 			}
+		} else {
+			// Optimization: Pre-allocate slice capacity if possible?
+			// Go append is fast enough here.
+			g.clients = append(g.clients, d.client)
+		}
+	}
 
-			// 2. Wrap in the Update Payload
-			// We use the cached RawMessage, so this Marshal only has to write
-			// the SubscriptionID and Type strings, then append the pre-calculated bytes.
-			finalPayload, err := json.Marshal(CachedRealTimeUpdatePayload{
-				Type:           EventTypeRealTimeUpdate,
-				SubscriptionID: dispatch.subID,
-				Event:          eventPayload,
-			})
+	// 2. Cache Marshaled Events.
+	// Multiple different Topics might be triggered by the SAME Event object.
+	// (e.g. Main Event matches "coll:orders" AND "query:orders:active").
+	// We marshal the *RealTimeEvent struct ONLY ONCE.
+	eventCache := make(map[*RealTimeEvent]json.RawMessage)
+
+	// 3. Process Groups and Broadcast
+	for topic, group := range groups {
+		// A. Resolve Event JSON from Cache
+		eventBytes, cached := eventCache[group.event]
+		if !cached {
+			var err error
+			eventBytes, err = json.Marshal(group.event)
 			if err != nil {
-				log.Printf("Error marshaling final payload: %v", err)
+				log.Printf("Error marshaling event: %v", err)
 				continue
 			}
+			eventCache[group.event] = eventBytes
+		}
 
-			// 3. Non-blocking Send
+		// B. Wrap in Payload
+		// This struct is lightweight. We inject the pre-marshaled event bytes (RawMessage).
+		// This step defines the specific Topic for the client routing.
+		payloadBytes, err := json.Marshal(CachedRealTimeUpdatePayload{
+			Type:  EventTypeRealTimeUpdate,
+			Topic: topic,
+			Event: eventBytes, // Zero-copy cast
+		})
+		if err != nil {
+			log.Printf("Error marshaling payload: %v", err)
+			continue
+		}
+
+		// C. Prepare WebSocket Frame (The Heavy Lift)
+		// This handles framing, masking (if server-to-client requires it), and compression once.
+		preparedMsg, err := websocket.NewPreparedMessage(websocket.TextMessage, payloadBytes)
+		if err != nil {
+			log.Printf("Error preparing message: %v", err)
+			continue
+		}
+
+		// D. Zero-Copy Send to all subscribers of this topic
+		for _, client := range group.clients {
 			select {
-			case dispatch.client.send <- finalPayload:
+			case client.sendPrepared <- preparedMsg:
 			default:
-				log.Printf("Client send buffer full, dropping message for client %p", &dispatch.client)
+				// If client buffer is full, we drop the message to protect the Hub.
+				// In a production system, we might want to disconnect slow clients.
+				log.Printf("Client buffer full, dropping msg for %p", client)
 			}
 		}
-	} else {
-		// log.Println("No Clients")
 	}
 }
 
