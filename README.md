@@ -195,14 +195,17 @@ make docker-build
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/health` | Server health check |
-| `GET` | `/db/collections` | List all collections |
-| `POST` | `/db/collections` | Create a new collection |
-| `POST` | `/db/indexes/{coll}` | Create an index |
-| `GET` | `/db/data/{coll}/{id}` | Get document |
-| `PUT` | `/db/data/{coll}/{id}` | Upsert document (Replace) |
-| `PATCH`| `/db/data/{coll}/{id}` | Update document (Merge Patch) |
-| `DEL` | `/db/data/{coll}/{id}` | Delete document |
-| `POST` | `/db/query/{coll}` | Execute one-time query |
+| `GET` | `/db/collections` | List all collections with schema |
+| `GET` | `/db/collections/{collection}` | Get collection with schema |
+| `POST` | `/db/collections/{collection}` | Create a new collection |
+| `PATCH` | `/db/collections/{collection}` | Update the collection schema |
+| `DELETE` | `/db/collections/{collection}` | Delete the collection |
+| `POST` | `/db/indexes/{collection}` | Create an index |
+| `GET` | `/db/data/{collection}/{id}` | Get document |
+| `PUT` | `/db/data/{collection}/{id}` | Upsert document (Replace) |
+| `PATCH`| `/db/data/{collection}/{id}` | Update document (Merge Patch) |
+| `DELETE`| `/db/data/{collection}/{id}` | Delete document |
+| `POST` | `/db/query/{collection}` | Execute one-time query |
 
 ---
 
