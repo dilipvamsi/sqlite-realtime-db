@@ -285,6 +285,9 @@
     }
   }
 
+  // ASCII Record Separator (RS)
+  const asciiRecordSeparator = '\x1e';
+
   /**
    * The main client for interacting with the Real-Time SQLite server.
    *
@@ -498,9 +501,9 @@
       this.websocket.onerror = (e) => this.eventEmitter.emit("error", e);
 
       this.websocket.onmessage = (e) => {
-        // The server batches messages separated by newlines (\n).
+        // The server batches messages separated by ascii record separator.
         // We must split them to parse individual JSON objects.
-        const messages = e.data.split('\n');
+        const messages = e.data.split(asciiRecordSeparator);
         for (const raw of messages) {
           if (!raw.trim()) continue;
           try {

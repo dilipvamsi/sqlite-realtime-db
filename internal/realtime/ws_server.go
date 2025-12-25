@@ -30,10 +30,8 @@ const (
 	maxMessageSize = 512
 )
 
-var (
-	newline = []byte{'\n'}
-	// space   = []byte{' '} // Unused
-)
+// ASCII Record Separator (RS)
+var asciiRecordSeparator = []byte{0x1e}
 
 // dbUpdateChan is the channel that the SQLite hook uses to notify the event processor.
 // It is buffered with size 1 to coalesce rapid-fire notifications into a single signal.
@@ -356,7 +354,7 @@ func (c *Client) writePump() {
 			// Optimization: Batch write queued messages to reduce syscalls
 			n := len(c.send)
 			for range n {
-				w.Write(newline)
+				w.Write(asciiRecordSeparator)
 				w.Write(<-c.send)
 			}
 
