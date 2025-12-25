@@ -44,8 +44,10 @@ func Server(db *sql.DB, host string, port uint16) {
 
 	// == Collection Routes ==
 	mux.HandleFunc("GET /db/collections", collectionHandler(db))
-	mux.HandleFunc("POST /db/collections", collectionHandler(db))
-	mux.HandleFunc("DELETE /db/collections", collectionHandler(db))
+	mux.HandleFunc("GET /db/collections/{collection}", collectionHandler(db))
+	mux.HandleFunc("POST /db/collections/{collection}", collectionHandler(db))
+	mux.HandleFunc("PATCH /db/collections/{collection}", collectionHandler(db))
+	mux.HandleFunc("DELETE /db/collections/{collection}", collectionHandler(db))
 
 	// == Index Route ==
 	mux.HandleFunc("POST /db/indexes/{collection}", indexHandler(db))

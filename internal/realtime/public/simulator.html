@@ -242,7 +242,7 @@
       try {
         // 1. Create Collection with Schema (Typed Columns)
         // This allows the backend to perform fast native SQL filtering
-        await client._fetch('/collections', {
+        await client._fetch(`/collections/${COLLECTION_NAME}`, {
           method: 'POST',
           body: JSON.stringify({
             name: COLLECTION_NAME,

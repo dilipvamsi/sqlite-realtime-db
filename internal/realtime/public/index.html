@@ -172,19 +172,22 @@
       <h4><span class="method get">GET</span> <code>/db/collections</code></h4>
       <p>Lists all user-created collections.</p>
       <pre><code>curl http://localhost:17050/db/collections</code></pre>
-      <p><strong>Example Response:</strong> <code>["realtime_order_demo", "users"]</code></p>
     </div>
     <div class="endpoint">
-      <h4><span class="method post">POST</span> <code>/db/collections</code></h4>
+      <h4><span class="method get">GET</span> <code>/db/collections/{collectionName}</code></h4>
+      <p>Lists all user-created collections.</p>
+      <pre><code>curl http://localhost:17050/db/collections/{collectionName}</code></pre>
+    </div>
+    <div class="endpoint">
+      <h4><span class="method post">POST</span> <code>/db/collections/{collectionName}</code></h4>
       <p>Creates a new collection with a defined schema for high-performance columns. Fields not in the schema are
         stored in the JSON.</p>
       <p><strong>Supported Types:</strong> <code>text</code>, <code>int</code>, <code>float</code>, <code>bool</code>,
         <code>datetime</code>.
       </p>
-      <pre><code>curl -X POST http://localhost:17050/db/collections \
+      <pre><code>curl -X POST http://localhost:17050/db/collections/{collectionName} \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "realtime_order_demo",
     "schema": [
         { "name": "status", "type": "text", "required": true },
         { "name": "total", "type": "int" },
@@ -193,9 +196,9 @@
   }'</code></pre>
     </div>
     <div class="endpoint">
-      <h4><span class="method delete">DELETE</span> <code>/db/collections</code></h4>
+      <h4><span class="method delete">DELETE</span> <code>/db/collections/{collectionName}</code></h4>
       <p>Deletes a collection and all its data.</p>
-      <pre><code>curl -X DELETE http://localhost:17050/db/collections -d '{"name": "realtime_order_demo"}'</code></pre>
+      <pre><code>curl -X DELETE http://localhost:17050/db/collections/{collectionName}'</code></pre>
     </div>
 
     <h3>Indexes</h3>
@@ -209,24 +212,24 @@
 
     <h3>Documents</h3>
     <div class="endpoint">
-      <h4><span class="method put">PUT</span> <code>/db/data/{collection}/{docId}</code></h4>
+      <h4><span class="method put">PUT</span> <code>/db/data/{collectionName}/{docId}</code></h4>
       <p>Creates a new document or fully replaces an existing one (Upsert).</p>
       <pre><code>curl -X PUT http://localhost:17050/db/data/realtime_order_demo/ord_100 \
   -d '{"status": "pending", "total": 150, "region": "US", "customer_note": "urgent"}'</code></pre>
     </div>
     <div class="endpoint">
-      <h4><span class="method get">GET</span> <code>/db/data/{collection}/{docId}</code></h4>
+      <h4><span class="method get">GET</span> <code>/db/data/{collectionName}/{docId}</code></h4>
       <p>Retrieves a single document.</p>
       <pre><code>curl http://localhost:17050/db/data/realtime_order_demo/ord_100</code></pre>
     </div>
     <div class="endpoint">
-      <h4><span class="method patch">PATCH</span> <code>/db/data/{collection}/{docId}</code></h4>
+      <h4><span class="method patch">PATCH</span> <code>/db/data/{collectionName}/{docId}</code></h4>
       <p>Partially updates a document using JSON Patch (RFC 7396).</p>
       <pre><code>curl -X PATCH http://localhost:17050/db/data/realtime_order_demo/ord_100 \
   -d '{"status": "shipped", "shippedAt": "2025-10-01T12:00:00Z"}'</code></pre>
     </div>
     <div class="endpoint">
-      <h4><span class="method delete">DELETE</span> <code>/db/data/{collection}/{docId}</code></h4>
+      <h4><span class="method delete">DELETE</span> <code>/db/data/{collectionName}/{docId}</code></h4>
       <p>Deletes a document.</p>
       <pre><code>curl -X DELETE http://localhost:17050/db/data/realtime_order_demo/ord_100</code></pre>
     </div>

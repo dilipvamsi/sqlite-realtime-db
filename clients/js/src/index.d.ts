@@ -153,7 +153,7 @@ export interface QueryDSL {
 }
 
 /** Defines the structure of a typed column in a collection schema. */
-export interface SchemaFieldDef {
+export interface SchemaField {
   /** The name of the column. */
   name: string;
   /** The data type of the column. */
@@ -162,6 +162,18 @@ export interface SchemaFieldDef {
   required?: boolean;
   /** Whether values must be unique across the collection. */
   unique?: boolean;
+}
+
+/** Defines the structure of update of collection schema */
+export interface CollectionUpdateSchema {
+  // Extract field from JSON Blob -> Native Column (Data Preserved)
+  promote?: SchemaField[];
+  // Move field from Native Column -> JSON Blob (Data Preserved)
+  demote?: string[];
+  // Create new Native Column (Starts NULL/Empty)
+  add?: SchemaField[];
+  // Drop Native Column (Data DESTROYED)
+  delete?: string[];
 }
 
 // =============================================================================
@@ -190,10 +202,22 @@ export interface IndexOptions {
 
 // --- Response Types ---
 
-export interface CollectionResponse {
-  status: "created" | "deleted";
+export interface CollectionCreationResponse {
+  status: "created";
   collection: string;
 }
+
+export interface CollectionUpdateResponse {
+  status: "updated";
+  collection: string;
+  schema: SchemaField[]
+}
+
+export interface CollectionDeletedResponse {
+  status: "deleted";
+  collection: string;
+}
+
 export interface IndexResponse {
   status: "created";
   collection: string;
@@ -305,11 +329,17 @@ export class RealTimeSQLite {
   /** Creates a new collection (table). */
   createCollection(
     name: string,
-    schema?: SchemaFieldDef[]
-  ): Promise<CollectionResponse>;
+    schema?: SchemaField[]
+  ): Promise<CollectionCreationResponse>;
+
+  /** Update the schema of the exisiting collection. */
+  updateCollectionSchema(
+    name: string,
+    update: CollectionUpdateSchema
+  ): Promise<CollectionUpdateResponse>;
 
   /** Deletes a collection. */
-  deleteCollection(name: string): Promise<CollectionResponse>;
+  deleteCollection(name: string): Promise<CollectionDeletedResponse>;
 
   /** Creates an index on specific fields. */
   createIndex(

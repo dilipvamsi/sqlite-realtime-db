@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	json "github.com/goccy/go-json"
+	"github.com/tidwall/sjson"
 
 	"github.com/gorilla/websocket"
 )
@@ -401,6 +402,18 @@ func (c *Client) fetchInitialData(db *sql.DB, sub Subscription) {
 	clientLimit := math.MaxInt32 // Default to "no limit".
 	clientOffset := 0
 
+	// 2. Prepare Schema Reconstruction Logic
+	// We must fetch "id", the "data" blob, and all "native columns" defined in the schema.
+	fields := GetCollectionFields(sub.Collection)
+
+	// Build the column list: "id, json(data), col1, col2..."
+	selectCols := []string{"id", "json(data)"}
+	for _, f := range fields {
+		selectCols = append(selectCols, f.Name)
+	}
+	// "SELECT id, json(data), status, total"
+	selectClause := "SELECT " + strings.Join(selectCols, ", ")
+
 	if sub.Query != nil {
 		if sub.Query.Limit > 0 {
 			clientLimit = sub.Query.Limit
@@ -409,19 +422,17 @@ func (c *Client) fetchInitialData(db *sql.DB, sub Subscription) {
 			clientOffset = sub.Query.Offset
 		}
 
-		// Create a temporary query builder object WITHOUT the pagination fields from the original query.
+		// Create a temporary query builder object WITHOUT the pagination fields.
 		// This ensures buildQuery creates a "pure" base query we can add our own LIMIT/OFFSET to.
 		queryBuilder := &QueryDSL{
 			Where:   sub.Query.Where,
 			OrderBy: sub.Query.OrderBy,
-			// Limit and Offset are deliberately left as zero.
 		}
-		// Build the base query using this clean builder object.
-		baseQuery, args, err = buildQuery(sub.Collection, queryBuilder)
+
+		// Build the base query using "main." prefix for schema lookup
+		baseQuery, args, err = buildQuery("main."+sub.Collection, queryBuilder)
 
 		if err != nil {
-			log.Printf("Error building query for sub %s: %v", sub.ID, err)
-			// Send a structured error using the new constant and payload struct.
 			log.Printf("Error building query for sub %s: %v", sub.ID, err)
 			errorPayload, _ := json.Marshal(SubscriptionErrorPayload{
 				SubscriptionID: sub.ID,
@@ -432,11 +443,15 @@ func (c *Client) fetchInitialData(db *sql.DB, sub Subscription) {
 			return
 		}
 
+		// INJECTION: Replace the default "SELECT id, json(data)" with our full column list
+		// so we can reconstruct the document.
+		baseQuery = strings.Replace(baseQuery, "SELECT id, json(data)", selectClause, 1)
+
 	} else if sub.DocID != "" {
-		baseQuery = fmt.Sprintf("SELECT id, data FROM %s WHERE id = ?;", sub.Collection)
+		baseQuery = fmt.Sprintf("%s FROM main.%s WHERE id = ?", selectClause, sub.Collection)
 		args = []any{sub.DocID}
 	} else {
-		baseQuery = fmt.Sprintf("SELECT id, data FROM %s;", sub.Collection)
+		baseQuery = fmt.Sprintf("%s FROM main.%s", selectClause, sub.Collection)
 	}
 
 	baseQuery = strings.TrimSuffix(baseQuery, ";")
@@ -463,25 +478,50 @@ func (c *Client) fetchInitialData(db *sql.DB, sub Subscription) {
 			break
 		}
 
+		// Prepare Scan Destinations (Reuse per batch)
+		// [0]=id, [1]=dataBlob, [2...N]=columns
+		scanDest := make([]any, len(selectCols))
+		var id string
+		var rawBlob []byte
+		scanDest[0] = &id
+		scanDest[1] = &rawBlob
+
+		// Interface pointers for dynamic columns
+		colValues := make([]any, len(fields))
+		for i := range fields {
+			scanDest[i+2] = &colValues[i]
+		}
+
 		batch := make([]Document, 0, currentBatchSize)
 		rowsInBatch := 0
+
 		for rows.Next() {
 			rowsInBatch++
-			var docID string
-			var data sql.NullString
-			if err := rows.Scan(&docID, &data); err != nil {
+
+			if err := rows.Scan(scanDest...); err != nil {
 				log.Printf("Error scanning initial data row: %v", err)
 				continue
 			}
-			doc := Document{
-				ID: docID,
+
+			// RECONSTRUCTION: Merge columns back into JSON
+			if len(rawBlob) == 0 {
+				rawBlob = []byte("{}")
 			}
-			if data.Valid {
-				// If the string is valid (not NULL), perform the zero-copy conversion.
-				doc.Data = unsafeStringToRawJson(data.String)
-			} else {
-				// If the data was NULL, set the RawMessage to nil.
-				doc.Data = nil
+
+			finalJSON := rawBlob
+
+			// 2. Inject Native Columns
+			for i, f := range fields {
+				val := colValues[i]
+				if val != nil {
+					// sjson.SetBytes handles primitives (int, float, bool) correctly
+					finalJSON, _ = sjson.SetBytes(finalJSON, f.Name, val)
+				}
+			}
+
+			doc := Document{
+				ID:   id,
+				Data: json.RawMessage(finalJSON),
 			}
 			batch = append(batch, doc)
 		}
@@ -490,7 +530,7 @@ func (c *Client) fetchInitialData(db *sql.DB, sub Subscription) {
 		if rowsInBatch > 0 {
 			c.sendBatch(sub, batch)
 			totalItemsFetched += rowsInBatch
-			if rowsInBatch == currentBatchSize { // Only sleep if we expect more data
+			if rowsInBatch == currentBatchSize {
 				time.Sleep(batchInterval)
 			}
 		}

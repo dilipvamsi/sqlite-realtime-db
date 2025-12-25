@@ -381,23 +381,26 @@
     }
     /** Creates a new collection. */
     createCollection(name, schema) {
-      const body = { name };
+      const body = {};
       // Pass the schema if provided (e.g. [{name: 'status', type: 'text'}])
       if (schema) {
         body.schema = schema;
       }
-
-      return this._fetch("/collections", {
+      return this._fetch(`/collections/${name}`, {
         method: "POST",
         body: JSON.stringify(body),
       });
     }
+    /** Update schema collection. */
+    updateCollectionSchema(name, update) {
+      return this._fetch(`/collections/${name}`, {
+        method: "PATCH",
+        body: JSON.stringify(update),
+      });
+    }
     /** Deletes a collection. */
     deleteCollection(name) {
-      return this._fetch("/collections", {
-        method: "DELETE",
-        body: JSON.stringify({ name }),
-      });
+      return this._fetch(`/collections/${name}`, { method: "DELETE" });
     }
     /** Creates an index. */
     createIndex(collectionName, options) {
