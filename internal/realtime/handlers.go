@@ -118,33 +118,8 @@ func fetchAndReconstruct(q Queryer, collection, docID string, fields []FieldDef)
 		return nil, err
 	}
 
-	// 4. Handle empty/null data blob.
-	if len(dataBlob) == 0 {
-		dataBlob = []byte("{}")
-	}
-
-	var err error
-	// // 5. Inject the ID back into the JSON (it's stored as PK, usually not in the blob).
-	// dataBlob, err = sjson.SetBytes(dataBlob, "id", docID)
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// 6. Merge Native Columns back into the JSON blob.
-	for i, f := range fields {
-		val := fieldValues[i]
-		// Only set if not NULL
-		if val != nil {
-			// sjson.SetBytes intelligently handles types.
-			// e.g., if 'val' is int64(50), it writes `50` (number), not `"50"` (string).
-			dataBlob, err = sjson.SetBytes(dataBlob, f.Name, val)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	return dataBlob, nil
+	// 4. Reconstruct using the shared zero-allocation helper
+	return constructDocumentJSON(dataBlob, fields, fieldValues)
 }
 
 // collectionHandler routes API requests to the appropriate collection management function.
@@ -1123,29 +1098,60 @@ func queryHandler(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 
-			// 7. Reconstruct the Full Document
-			// Start with the blob (which contains un-promoted fields)
-			if len(dataBlob) == 0 {
-				dataBlob = []byte("{}")
-			}
-
-			// Merge Native Columns back into JSON
-			for i, f := range fields {
-				val := colValues[i]
-				if val != nil {
-					// sjson handles primitive types correctly here
-					dataBlob, _ = sjson.SetBytes(dataBlob, f.Name, val)
-				}
+			// 7. Reconstruct the Full Document (Optimized Zero-Parse Splicing)
+			finalJSON, err := constructDocumentJSON(dataBlob, fields, colValues)
+			if err != nil {
+				continue
 			}
 
 			// Append to result list
 			results = append(results, Document{
 				ID:   id,
-				Data: json.RawMessage(dataBlob),
+				Data: json.RawMessage(finalJSON),
 			})
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(results)
 	}
+}
+
+// constructDocumentJSON merges the document ID, native columns, and the remaining JSON blob
+// into a single JSON byte slice using zero-parse splicing.
+func constructDocumentJSON(rawBlob []byte, fields []FieldDef, colValues []any) ([]byte, error) {
+	// 1. Create Header (Native Columns)
+	headerMap := make(map[string]any, len(fields))
+
+	for i, f := range fields {
+		val := colValues[i]
+		if val != nil {
+			headerMap[f.Name] = val
+		}
+	}
+
+	// 2. Marshal Header
+	headerBytes, err := json.Marshal(headerMap)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Splice Header + Blob
+	// If rawBlob is empty/nil or just "{}" (len 2), return header only
+	if len(rawBlob) <= 2 {
+		return headerBytes, nil
+	}
+
+	// Alloc exact size: header + comma + blob - 1 overlap (})
+	// len(header) - 1 (}) + 1 (,) + len(blob) - 1 ({) = len(header) + len(blob) - 1
+	finalJSON := make([]byte, 0, len(headerBytes)+len(rawBlob))
+
+	// Append Header (minus closing '}')
+	finalJSON = append(finalJSON, headerBytes[:len(headerBytes)-1]...)
+	// Append Comma
+	finalJSON = append(finalJSON, ',')
+	// Append Blob (minus opening '{')
+	// Assumes valid JSON starting with '{'
+	finalJSON = append(finalJSON, rawBlob[1:]...)
+
+	return finalJSON, nil
 }

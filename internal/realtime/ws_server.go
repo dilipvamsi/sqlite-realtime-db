@@ -12,7 +12,6 @@ import (
 	"unsafe"
 
 	json "github.com/goccy/go-json"
-	"github.com/tidwall/sjson"
 
 	"github.com/gorilla/websocket"
 )
@@ -45,6 +44,8 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin:     func(r *http.Request) bool { return true }, // Allow all origins
+	// ENABLE COMPRESSION
+	EnableCompression: true,
 }
 
 // serveWs handles incoming WebSocket connections, creating a Client object for each.
@@ -506,19 +507,10 @@ func (c *Client) fetchInitialData(db *sql.DB, sub Subscription) {
 			}
 
 			// RECONSTRUCTION: Merge columns back into JSON
-			if len(rawBlob) == 0 {
-				rawBlob = []byte("{}")
-			}
-
-			finalJSON := rawBlob
-
-			// 2. Inject Native Columns
-			for i, f := range fields {
-				val := colValues[i]
-				if val != nil {
-					// sjson.SetBytes handles primitives (int, float, bool) correctly
-					finalJSON, _ = sjson.SetBytes(finalJSON, f.Name, val)
-				}
+			finalJSON, err := constructDocumentJSON(rawBlob, fields, colValues)
+			if err != nil {
+				log.Printf("Error constructing document JSON: %v", err)
+				continue
 			}
 
 			doc := Document{
