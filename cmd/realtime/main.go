@@ -3,21 +3,38 @@ package main
 
 import (
 	"fmt"
-	"sqlite-realtime-db/internal/realtime"
 	"os"
+	"runtime/debug"
 	"strconv"
+
+	"sqlite-realtime-db/internal/realtime"
 )
 
 func main() {
+	// OPTIMIZATION: Reduce GC pressure.
+	// Default is 100. Setting to 200 tells Go to wait until the heap doubles
+	// before sweeping. This trades slightly more RAM usage for significantly
+	// lower CPU usage and latency spikes during high event throughput.
+	debug.SetGCPercent(200)
 
+	// 1. Database Configuration
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
 		dbPath = "./data/realtime.db"
 	}
 
-	db := realtime.InitDB(dbPath)
+	logPath := os.Getenv("LOG_DB_PATH")
+	if logPath == "" {
+		// By default, store logs in a separate file next to the main DB
+		logPath = "./data/logs.db"
+	}
+
+	// 2. Initialize Database (Main + Attached Logs)
+	// This sets up the connection pool, schemas, and in-memory caches.
+	db := realtime.InitDB(dbPath, logPath)
 	defer db.Close()
 
+	// 3. Server Configuration
 	host := os.Getenv("HOST")
 	if host == "" {
 		host = "localhost"
@@ -28,12 +45,12 @@ func main() {
 	if strPort != "" {
 		val64, err := strconv.ParseUint(strPort, 10, 16)
 		if err != nil {
-			// This block will execute if the string is not a valid number
-			// or if the number is out of the uint16 range (0-65535).
-			fmt.Printf("Error parsing string: %v\n", err)
+			fmt.Printf("Error parsing PORT '%s': %v\n", strPort, err)
 			return
 		}
 		port = uint16(val64)
 	}
+
+	// 4. Start Server
 	realtime.Server(db, host, port)
 }

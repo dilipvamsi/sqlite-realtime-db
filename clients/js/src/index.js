@@ -380,10 +380,16 @@
       return this._fetch("/collections");
     }
     /** Creates a new collection. */
-    createCollection(name) {
+    createCollection(name, schema) {
+      const body = { name };
+      // Pass the schema if provided (e.g. [{name: 'status', type: 'text'}])
+      if (schema) {
+        body.schema = schema;
+      }
+
       return this._fetch("/collections", {
         method: "POST",
-        body: JSON.stringify({ name }),
+        body: JSON.stringify(body),
       });
     }
     /** Deletes a collection. */

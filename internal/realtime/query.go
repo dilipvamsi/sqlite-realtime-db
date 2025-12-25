@@ -173,33 +173,45 @@ func ParseAndValidateQuery(jsonData json.RawMessage) (*QueryDSL, error) {
 	return &query, nil
 }
 
-// buildQuery translates a QueryDSL object into a parameterized SQL query and a slice of arguments.
-func buildQuery(collection string, dsl *QueryDSL) (string, []any, error) {
-	// This sanitizer regex should be defined in your package, e.g., in a `var` block.
-	// var collectionNameSanitizer = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
-	if !collectionNameSanitizer.MatchString(collection) {
-		return "", nil, fmt.Errorf("invalid collection name")
+// Helper to check if a field is a native column
+// It parses the table name from "main.collection" to look up in cache
+func isNativeColumn(namespacedCollection, field string) bool {
+	parts := strings.Split(namespacedCollection, ".")
+	collectionName := parts[len(parts)-1] // Get "orders" from "main.orders"
+
+	fields := GetCollectionFields(collectionName)
+	for _, f := range fields {
+		if f.Name == field {
+			return true
+		}
 	}
+	return false
+}
+
+// buildQuery translates a QueryDSL object into a parameterized SQL query.
+func buildQuery(collection string, dsl *QueryDSL) (string, []any, error) {
+	// Note: 'collection' usually comes in as "main.orders" here
+	// The sanitizer might need adjustment if it doesn't allow dots,
+	// but currently it's used inside handlers.go BEFORE adding "main.".
+	// Here we assume it is safe.
 
 	var args []any
 	var whereClause string
 	var err error
 
-	// The logic here remains the same, but it now passes the typed struct.
 	if dsl.Where != nil {
-		whereClause, args, err = parseWhereClause(dsl.Where)
+		whereClause, args, err = parseWhereClause(collection, dsl.Where)
 		if err != nil {
 			return "", nil, err
 		}
 	}
 
-	sql := fmt.Sprintf("SELECT id, data FROM %s", collection)
+	// Important: We select 'json(data)' to convert JSON (JSON) back to Text for the client
+	sql := fmt.Sprintf("SELECT id, json(data) FROM %s", collection)
 	if whereClause != "" {
 		sql += " WHERE " + whereClause
 	}
 
-	// This sanitizer regex should also be defined in your package.
-	// var identifierSanitizer = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 	if len(dsl.OrderBy) > 0 {
 		sql += " ORDER BY "
 		var orderByParts []string
@@ -211,8 +223,13 @@ func buildQuery(collection string, dsl *QueryDSL) (string, []any, error) {
 			if strings.ToUpper(ob.Direction) == "DESC" {
 				dir = "DESC"
 			}
-			orderByParts = append(orderByParts, fmt.Sprintf("json_extract(data, ?)%s", dir))
-			args = append(args, "$."+ob.Field)
+
+			// OPTIMIZATION: Check if sorting on Native Column or JSON
+			if isNativeColumn(collection, ob.Field) {
+				orderByParts = append(orderByParts, fmt.Sprintf("%s %s", ob.Field, dir))
+			} else {
+				orderByParts = append(orderByParts, fmt.Sprintf("json_extract(data, '$.%s') %s", ob.Field, dir))
+			}
 		}
 		sql += strings.Join(orderByParts, ", ")
 	}
@@ -227,19 +244,17 @@ func buildQuery(collection string, dsl *QueryDSL) (string, []any, error) {
 	}
 
 	sql += ";"
-
 	return sql, args, nil
 }
 
-// parseWhereClause is a recursive function that safely builds the WHERE clause from the typed Where struct.
-func parseWhereClause(w *Where) (string, []any, error) {
-	// Handle logical AND
+// parseWhereClause builds the SQL WHERE string recursively.
+// It now takes 'collection' to perform schema lookups for optimization.
+func parseWhereClause(collection string, w *Where) (string, []any, error) {
 	if w.And != nil {
 		var parts []string
 		var args []any
 		for _, cond := range *w.And {
-			// We pass the address of the condition struct in the slice
-			subClause, subArgs, err := parseWhereClause(&cond)
+			subClause, subArgs, err := parseWhereClause(collection, &cond)
 			if err != nil {
 				return "", nil, err
 			}
@@ -249,12 +264,11 @@ func parseWhereClause(w *Where) (string, []any, error) {
 		return "(" + strings.Join(parts, " AND ") + ")", args, nil
 	}
 
-	// Handle logical OR
 	if w.Or != nil {
 		var parts []string
 		var args []any
 		for _, cond := range *w.Or {
-			subClause, subArgs, err := parseWhereClause(&cond)
+			subClause, subArgs, err := parseWhereClause(collection, &cond)
 			if err != nil {
 				return "", nil, err
 			}
@@ -264,14 +278,13 @@ func parseWhereClause(w *Where) (string, []any, error) {
 		return "(" + strings.Join(parts, " OR ") + ")", args, nil
 	}
 
-	// Base case: handle a simple condition
 	if w.Field != nil && w.Op != nil && w.Value != nil {
 		field := *w.Field
 		op := *w.Op
 		value := w.Value
 
 		if !identifierSanitizer.MatchString(field) {
-			return "", nil, fmt.Errorf("invalid field name in condition: %s", field)
+			return "", nil, fmt.Errorf("invalid field name: %s", field)
 		}
 
 		var safeOp string
@@ -292,9 +305,18 @@ func parseWhereClause(w *Where) (string, []any, error) {
 			return "", nil, fmt.Errorf("unsupported operator: %s", op)
 		}
 
-		sql := fmt.Sprintf("json_extract(data, ?)%s?", safeOp)
-		args := []any{"$." + field, value}
-		return sql, args, nil
+		// OPTIMIZATION: Hybrid Schema Awareness
+		if isNativeColumn(collection, field) {
+			// Fast Path: Native SQL Column
+			// Example: status = ?
+			sql := fmt.Sprintf("%s %s ?", field, safeOp)
+			return sql, []any{value}, nil
+		} else {
+			// Slow Path: JSON Extraction
+			// Example: json_extract(data, '$.status') = ?
+			sql := fmt.Sprintf("json_extract(data, '$.%s') %s ?", field, safeOp)
+			return sql, []any{value}, nil
+		}
 	}
 
 	return "", nil, fmt.Errorf("invalid where clause object")

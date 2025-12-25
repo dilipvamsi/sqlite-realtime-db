@@ -152,6 +152,18 @@ export interface QueryDSL {
   offset?: number;
 }
 
+/** Defines the structure of a typed column in a collection schema. */
+export interface SchemaFieldDef {
+  /** The name of the column. */
+  name: string;
+  /** The data type of the column. */
+  type: "text" | "int" | "float" | "bool" | "datetime";
+  /** Whether the column must have a value. */
+  required?: boolean;
+  /** Whether values must be unique across the collection. */
+  unique?: boolean;
+}
+
 // =============================================================================
 // 3. API & CLIENT OPTIONS
 // =============================================================================
@@ -291,7 +303,10 @@ export class RealTimeSQLite {
   getCollections(): Promise<string[]>;
 
   /** Creates a new collection (table). */
-  createCollection(name: string): Promise<CollectionResponse>;
+  createCollection(
+    name: string,
+    schema?: SchemaFieldDef[]
+  ): Promise<CollectionResponse>;
 
   /** Deletes a collection. */
   deleteCollection(name: string): Promise<CollectionResponse>;

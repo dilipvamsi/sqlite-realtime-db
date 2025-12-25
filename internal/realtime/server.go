@@ -104,7 +104,7 @@ func Server(db *sql.DB, host string, port uint16) {
 	}
 
 	// 6. Start the server
-	log.Printf("Server starting on %s:%d...\n", host, port)
+	log.Printf("Server starting on http://%s:%d...\n", host, port)
 	if err := http.ListenAndServe(fmt.Sprintf("%s:%d", host, port), mux); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}

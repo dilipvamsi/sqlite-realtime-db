@@ -24,7 +24,7 @@ func runEventProcessor(db *sql.DB, hub *Hub) {
 	// This ensures that on restart, it picks up exactly where it left off.
 	var lastProcessedId int64
 	var valueStr string
-	err := db.QueryRow(`SELECT value FROM system_state WHERE key = 'last_processed_changelog_id'`).Scan(&valueStr)
+	err := db.QueryRow(`SELECT value FROM audit.system_state WHERE key = 'last_processed_changelog_id'`).Scan(&valueStr)
 	if err != nil {
 		log.Fatalf("FATAL: Could not read last_processed_changelog_id from database: %v", err)
 	}
@@ -34,7 +34,7 @@ func runEventProcessor(db *sql.DB, hub *Hub) {
 	// This removes the SQL parsing overhead from the tight loop.
 	stmt, err := db.Prepare(`
         SELECT id, operation, collection_name, document_id, new_data, old_data
-        FROM changelog
+        FROM audit.changelog
         WHERE id > ?
         ORDER BY id ASC
         LIMIT ?`) // Parameterize Limit
@@ -88,7 +88,7 @@ func runEventProcessor(db *sql.DB, hub *Hub) {
 
 			// Persist the new lastProcessedId *after* a batch is successfully processed.
 			if newLastIdInBatch > lastProcessedId {
-				_, err := dbExec(db, `UPDATE system_state SET value = ? WHERE key = 'last_processed_changelog_id'`, newLastIdInBatch)
+				_, err := dbExec(db, `UPDATE audit.system_state SET value = ? WHERE key = 'last_processed_changelog_id'`, newLastIdInBatch)
 				if err != nil {
 					// If this fails, we don't update our in-memory ID. This ensures we will retry
 					// processing this batch on the next wakeup, providing at-least-once delivery.
