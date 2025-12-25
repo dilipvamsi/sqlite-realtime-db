@@ -9,9 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // StorageTimeFormat defines the strict ISO8601 format used for storing datetimes.
@@ -272,108 +269,17 @@ func setDocumentHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		fields := GetCollectionFields(collection)
-
-		// --- Build Dynamic SQL for Split Storage ---
-		// We prepare to write: id, data_blob, col1, col2...
-		cols := []string{"id", "data"}
-		placeholders := []string{"?", "jsonb(?)"} // Convert JSON to optimized binary JSONB
-		args := []any{docID}                      // Note: blob added later
-		updateSets := []string{"data=excluded.data"}
-
-		// Make a copy of bodyBytes to serve as the Blob.
-		// We will remove fields from this Blob if they are stored in columns.
-		blobBytes := bodyBytes
-
-		// Loop through schema fields to prepare columns and arguments
-		for _, field := range fields {
-			cols = append(cols, field.Name)
-			placeholders = append(placeholders, "?")
-			updateSets = append(updateSets, fmt.Sprintf("%s=excluded.%s", field.Name, field.Name))
-
-			// Extract value efficiently using gjson (zero allocation)
-			res := gjson.GetBytes(bodyBytes, field.Name)
-			var val any
-
-			// Map JSON types to Go types for the SQL Driver
-			switch field.Type {
-			case TypeInt:
-				val = res.Int()
-			case TypeFloat:
-				val = res.Float()
-			case TypeBool:
-				if res.Bool() {
-					val = 1
-				} else {
-					val = 0
-				}
-			case TypeDateTime:
-				// Validate and Normalize to UTC String with Millis
-				rawStr := res.String()
-				validStr, err := validateAndNormalizeDateTime(rawStr)
-				if err != nil {
-					http.Error(w, fmt.Sprintf("Field '%s' invalid datetime: %s", field.Name, rawStr), 400)
-					return
-				}
-				val = validStr
-			default: // TypeText
-				val = res.String()
-			}
-			args = append(args, val)
-
-			// CRITICAL: Remove this field from the Blob to avoid data duplication.
-			// sjson.DeleteBytes creates a new byte slice with the key removed.
-			blobBytes, _ = sjson.DeleteBytes(blobBytes, field.Name)
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, "DB Connection Error", 500)
+			return
 		}
-
-		// Inject the modified blob into arguments at index 1 (after docID)
-		finalArgs := []any{docID, blobBytes}
-		finalArgs = append(finalArgs, args[1:]...)
-
-		// Build the final UPSERT query string
-		query := fmt.Sprintf(
-			"INSERT INTO main.%s (%s) VALUES (%s) ON CONFLICT(id) DO UPDATE SET %s",
-			collection,
-			strings.Join(cols, ", "),
-			strings.Join(placeholders, ", "),
-			strings.Join(updateSets, ", "),
-		)
-
-		tx, _ := db.Begin()
 		defer tx.Rollback()
 
-		// 1. Fetch Old Data (Must Reconstruct)
-		// We need the full document state *before* the change to log it correctly.
-		oldDataBytes, err := fetchAndReconstruct(tx, collection, docID, fields)
-		var oldData sql.NullString
-		if err == nil {
-			oldData.String = string(oldDataBytes)
-			oldData.Valid = true
-		} else if err != sql.ErrNoRows {
-			http.Error(w, "Read Error: "+err.Error(), 500)
-			return
-		}
+		opType, err := ApplySetDocument(tx, collection, docID, bodyBytes)
 
-		// Determine operation type for the log
-		opType := "UPDATE"
-		if !oldData.Valid {
-			opType = "INSERT"
-		}
-
-		// 2. Write Data to Main DB (Split Storage)
-		if _, err := tx.Exec(query, finalArgs...); err != nil {
-			http.Error(w, "Write Failed: "+err.Error(), 500)
-			return
-		}
-
-		// 3. Write Full Audit Log
-		// We log the ORIGINAL bodyBytes (Full JSON) so listeners get the complete picture.
-		_, err = tx.Exec(
-			`INSERT INTO audit.changelog (operation, collection_name, document_id, new_data, old_data) VALUES (?, ?, ?, json(?), json(?))`,
-			opType, collection, docID, bodyBytes, oldData,
-		)
 		if err != nil {
-			http.Error(w, "Audit Failed", 500)
+			http.Error(w, err.Error(), 500)
 			return
 		}
 
@@ -381,7 +287,6 @@ func setDocumentHandler(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "Commit Failed", 500)
 			return
 		}
-
 		// Signal Event Processor
 		notifyUpdate()
 
@@ -391,7 +296,7 @@ func setDocumentHandler(db *sql.DB) http.HandlerFunc {
 		} else {
 			w.WriteHeader(http.StatusOK)
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "replaced", "id": docID, "operation": opType})
+		json.NewEncoder(w).Encode(map[string]string{"status": "replaced", "id": docID, "operation": string(opType)})
 	}
 }
 
@@ -408,102 +313,24 @@ func updateDocumentHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		fields := GetCollectionFields(collection)
-		// Parse the patch to see which keys are actually being updated
-		patchResult := gjson.ParseBytes(patchBytes)
-
-		// We maintain a "Blob Patch" which is the original patch minus any promoted columns
-		blobPatchBytes := patchBytes
-
-		updateParts := []string{}
-		args := []any{}
-
-		// Iterate columns to see if they are involved in the patch
-		for _, field := range fields {
-			valRes := patchResult.Get(field.Name)
-			if valRes.Exists() {
-				// 1. Add column to SQL UPDATE clause
-				updateParts = append(updateParts, fmt.Sprintf("%s = ?", field.Name))
-
-				var val any
-				switch field.Type {
-				case TypeInt:
-					val = valRes.Int()
-				case TypeFloat:
-					val = valRes.Float()
-				case TypeBool:
-					if valRes.Bool() {
-						val = 1
-					} else {
-						val = 0
-					}
-				case TypeDateTime:
-					rawStr := valRes.String()
-					validStr, err := validateAndNormalizeDateTime(rawStr)
-					if err != nil {
-						http.Error(w, fmt.Sprintf("Field '%s' invalid datetime: %s", field.Name, rawStr), 400)
-						return
-					}
-					val = validStr
-				default:
-					val = valRes.String()
-				}
-				args = append(args, val)
-
-				// 2. Remove this key from the Blob Patch so it's not stored twice
-				blobPatchBytes, _ = sjson.DeleteBytes(blobPatchBytes, field.Name)
-			}
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, "DB Error", 500)
+			return
 		}
-
-		// Only apply jsonb_patch if there is still data in the blob patch (e.g., non-schema fields)
-		if len(blobPatchBytes) > 2 { // Empty JSON "{}" is 2 bytes
-			updateParts = append(updateParts, "data = jsonb_patch(data, jsonb(?))")
-			args = append(args, blobPatchBytes)
-		}
-
-		if len(updateParts) == 0 {
-			w.WriteHeader(http.StatusOK)
-			return // Nothing to do
-		}
-
-		args = append(args, docID) // Add ID for WHERE clause
-
-		tx, _ := db.Begin()
 		defer tx.Rollback()
 
-		// 1. Get Old Data (Full Reconstruction)
-		// We need this for the Audit Log 'old_data' field.
-		oldDataBytes, err := fetchAndReconstruct(tx, collection, docID, fields)
-		if err != nil {
-			http.Error(w, "Document not found", 404)
-			return
-		}
-
-		// 2. Execute the Physical Update
-		sql := fmt.Sprintf("UPDATE main.%s SET %s WHERE id = ?", collection, strings.Join(updateParts, ", "))
-		if _, err := tx.Exec(sql, args...); err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-
-		// 3. Get New Data (Full Reconstruction)
-		// Since we performed a partial patch inside the DB engine (via jsonb_patch),
-		// we don't know the final state in Go memory. We must read it back to log it.
-		newDataBytes, _ := fetchAndReconstruct(tx, collection, docID, fields)
-
-		// 4. Write Audit Log
-		_, err = tx.Exec(
-			`INSERT INTO audit.changelog (operation, collection_name, document_id, new_data, old_data) VALUES (?, ?, ?, json(?), json(?))`,
-			"UPDATE", collection, docID, newDataBytes, oldDataBytes,
-		)
-
-		if err != nil {
-			http.Error(w, "Audit Failed: "+err.Error(), 500)
+		if err := ApplyUpdateDocument(tx, collection, docID, patchBytes); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				http.Error(w, err.Error(), 404)
+			} else {
+				http.Error(w, err.Error(), 500)
+			}
 			return
 		}
 
 		if err := tx.Commit(); err != nil {
-			http.Error(w, "Commit failed", 500)
+			http.Error(w, "Commit Failed", 500)
 			return
 		}
 
@@ -520,31 +347,27 @@ func deleteDocumentHandler(db *sql.DB) http.HandlerFunc {
 		collection := r.PathValue("collection")
 		docID := r.PathValue("docId")
 
-		tx, _ := db.Begin()
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, "DB Error", 500)
+			return
+		}
 		defer tx.Rollback()
 
-		// 1. Fetch Full Old Data (Reconstructed)
-		// We must log exactly what was deleted so clients can handle REMOVE logic.
-		fields := GetCollectionFields(collection)
-		oldDataBytes, err := fetchAndReconstruct(tx, collection, docID, fields)
-		if err != nil {
-			http.Error(w, "Not found", 404)
+		if err := ApplyDeleteDocument(tx, collection, docID); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				http.Error(w, err.Error(), 404)
+			} else {
+				http.Error(w, err.Error(), 500)
+			}
 			return
 		}
 
-		// 2. Delete from Main DB
-		if _, err := tx.Exec(fmt.Sprintf("DELETE FROM main.%s WHERE id = ?", collection), docID); err != nil {
-			http.Error(w, err.Error(), 500)
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "Commit Failed", 500)
 			return
 		}
 
-		// 3. Audit Log (new_data is NULL)
-		if _, err := tx.Exec(`INSERT INTO audit.changelog (operation, collection_name, document_id, new_data, old_data) VALUES (?, ?, ?, NULL, json(?))`, "DELETE", collection, docID, oldDataBytes); err != nil {
-			http.Error(w, "Audit Failed", 500)
-			return
-		}
-
-		tx.Commit()
 		notifyUpdate()
 
 		w.Header().Set("Content-Type", "application/json")
@@ -969,7 +792,7 @@ func indexHandler(db *sql.DB) http.HandlerFunc {
 		if req.Unique {
 			sqlBuilder.WriteString("UNIQUE ")
 		}
-		sqlBuilder.WriteString(fmt.Sprintf("INDEX IF NOT EXISTS main.%s ON %s (", req.Name, collection))
+		fmt.Fprintf(&sqlBuilder, "INDEX IF NOT EXISTS main.%s ON %s (", req.Name, collection)
 
 		cols := make([]string, len(req.Fields))
 		collFields := GetCollectionFields(collection)
@@ -1154,4 +977,76 @@ func constructDocumentJSON(rawBlob []byte, fields []FieldDef, colValues []any) (
 	finalJSON = append(finalJSON, rawBlob[1:]...)
 
 	return finalJSON, nil
+}
+
+type BatchOperation struct {
+	Method     string          `json:"method"` // "PUT", "PATCH", "DELETE"
+	Collection string          `json:"collection"`
+	DocID      string          `json:"docId"`
+	Data       json.RawMessage `json:"data,omitempty"`
+}
+
+type BatchRequest struct {
+	Operations []BatchOperation `json:"operations"`
+}
+
+func batchHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req BatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", 400)
+			return
+		}
+
+		// 1. Start ONE Transaction for all 1000 items
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, "DB Error", 500)
+			return
+		}
+		defer tx.Rollback()
+
+		// 2. Loop and Router
+		for _, op := range req.Operations {
+			// Basic Validation
+			if op.Collection == "" || op.DocID == "" {
+				http.Error(w, "Missing collection or docId", 400)
+				return
+			}
+
+			var opErr error
+			switch strings.ToUpper(op.Method) {
+			case "PUT":
+				_, opErr = ApplySetDocument(tx, op.Collection, op.DocID, []byte(op.Data))
+			case "PATCH":
+				opErr = ApplyUpdateDocument(tx, op.Collection, op.DocID, []byte(op.Data))
+			case "DELETE":
+				opErr = ApplyDeleteDocument(tx, op.Collection, op.DocID)
+			default:
+				http.Error(w, "Unknown method: "+op.Method, 400)
+				return
+			}
+
+			if opErr != nil {
+				// Atomicity: If ONE fails, the WHOLE batch fails.
+				http.Error(w, fmt.Sprintf("Error on %s %s: %v", op.Collection, op.DocID, opErr), 500)
+				return
+			}
+		}
+
+		// 3. Commit ONCE (The massive performance win)
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "Commit Failed", 500)
+			return
+		}
+
+		// 4. Notify ONCE
+		notifyUpdate()
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"count":  len(req.Operations),
+		})
+	}
 }

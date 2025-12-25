@@ -64,6 +64,9 @@ func Server(db *sql.DB, host string, port uint16) {
 	// We use POST to allow for a complex JSON query object in the request body.
 	mux.HandleFunc("POST /db/query/{collection}", queryHandler(db))
 
+	// == Batch Route ==
+    mux.HandleFunc("POST /db/batch", batchHandler(db))
+
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) { serveWs(hub, w, r, db) })
 	publicFS, err := fs.Sub(publicFs, "public")
 	if err != nil {
