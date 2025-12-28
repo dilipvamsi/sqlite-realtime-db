@@ -438,6 +438,13 @@
     deleteDocument(collection, docId) {
       return this._fetch(`/data/${collection}/${docId}`, { method: "DELETE" });
     }
+    /** Batch operations as single transactions. */
+    batch(operations) {
+      return this._fetch("/batch", {
+        method: "POST",
+        body: JSON.stringify({ operations }),
+      });
+    }
     /** Executes a query. */
     queryCollection(collection, dsl) {
       return this._fetch(`/query/${collection}`, {

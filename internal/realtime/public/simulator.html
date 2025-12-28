@@ -15,10 +15,11 @@
       --success: #03dac6;
       --warning: #cf6679;
       --info: #3700b3;
+      --batch: #ff9800;
     }
 
     body {
-      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
       background-color: var(--bg);
       color: var(--text);
       margin: 0;
@@ -60,7 +61,7 @@
       border-radius: 8px;
       padding: 15px;
       overflow-y: auto;
-      font-family: "Consolas", monospace;
+      font-family: 'Consolas', monospace;
       font-size: 13px;
       display: flex;
       flex-direction: column-reverse;
@@ -94,6 +95,11 @@
 
     .btn-stop {
       background-color: var(--warning);
+      color: #000;
+    }
+
+    .btn-batch {
+      background-color: var(--batch);
       color: #000;
     }
 
@@ -144,12 +150,17 @@
       color: var(--warning);
     }
 
+    .op-batch {
+      color: var(--batch);
+      font-weight: bold;
+    }
+
     .op-system {
       color: #888;
       font-style: italic;
     }
 
-    input[type="range"] {
+    input[type=range] {
       width: 100%;
       margin-top: 10px;
     }
@@ -175,22 +186,25 @@
 
       <div>
         <label>Simulation Speed (<span id="speed-label">500</span>ms)</label>
-        <input type="range" id="speed-slider" min="100" max="2000" step="100" value="500" />
+        <input type="range" id="speed-slider" min="100" max="2000" step="100" value="500">
       </div>
 
-      <button id="btn-start" class="btn-start">▶ Start Simulation</button>
-      <button id="btn-stop" class="btn-stop" disabled>⏹ Stop</button>
+      <div style="display: flex; gap: 10px;">
+        <button id="btn-start" class="btn-start" style="flex:1">▶ Start</button>
+        <button id="btn-stop" class="btn-stop" style="flex:1" disabled>⏹ Stop</button>
+      </div>
 
-      <hr style="width: 100%; border-color: #333" />
+      <!-- Batch Transaction Button -->
+      <button id="btn-batch" class="btn-batch">💥 Batch Transaction (x10)</button>
+
+      <hr style="width: 100%; border-color: #333;">
 
       <button id="btn-setup" class="btn-reset">🛠 Reset DB Schema</button>
     </div>
 
     <!-- Logs -->
     <div id="log-container" class="log-panel">
-      <div class="log-entry">
-        <span class="log-time">System:</span> Ready. Click Start to begin.
-      </div>
+      <div class="log-entry"><span class="log-time">System:</span> Ready. Click Start to begin.</div>
     </div>
   </div>
 
@@ -207,18 +221,15 @@
 
     const btnStart = document.getElementById("btn-start");
     const btnStop = document.getElementById("btn-stop");
+    const btnBatch = document.getElementById("btn-batch");
     const btnSetup = document.getElementById("btn-setup");
     const slider = document.getElementById("speed-slider");
     const speedLabel = document.getElementById("speed-label");
     const countDisplay = document.getElementById("active-count");
     const logContainer = document.getElementById("log-container");
 
-    function randomInt(min, max) {
-      return Math.floor(Math.random() * (max - min + 1) + min);
-    }
-    function randomItem(arr) {
-      return arr[Math.floor(Math.random() * arr.length)];
-    }
+    function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1) + min); }
+    function randomItem(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
     function log(op, text) {
       const div = document.createElement("div");
@@ -229,44 +240,23 @@
       if (op === "INSERT") colorClass = "op-insert";
       if (op === "UPDATE") colorClass = "op-update";
       if (op === "DELETE") colorClass = "op-delete";
+      if (op === "BATCH") colorClass = "op-batch";
       if (op === "SYSTEM") colorClass = "op-system";
 
       div.innerHTML = `<span class="log-time">[${time}]</span> <strong class="${colorClass}">${op}</strong>: ${text}`;
       logContainer.insertBefore(div, logContainer.firstChild);
-      if (logContainer.children.length > 50)
-        logContainer.removeChild(logContainer.lastChild);
+      if (logContainer.children.length > 50) logContainer.removeChild(logContainer.lastChild);
     }
 
-    // UPDATED: Now creates a typed collection schema for performance
     async function ensureSchema() {
       try {
-        // 1. Create Collection with Schema (Typed Columns)
-        // This allows the backend to perform fast native SQL filtering
-        await client._fetch(`/collections/${COLLECTION_NAME}`, {
-          method: 'POST',
-          body: JSON.stringify({
-            name: COLLECTION_NAME,
-            schema: [
-              { name: "status", type: "text", required: true },
-              { name: "total", type: "int" },
-              { name: "region", type: "text" }
-            ]
-          })
-        }).catch(() => { }); // Ignore error if exists
-
-        // 2. Create Indexes (These will now be native indexes because columns exist)
-        await client.createIndex(COLLECTION_NAME, {
-          name: "idx_status",
-          fields: ["status"],
-        });
-        await client.createIndex(COLLECTION_NAME, {
-          name: "idx_total",
-          fields: ["total"],
-        });
-        await client.createIndex(COLLECTION_NAME, {
-          name: "idx_region",
-          fields: ["region"],
-        });
+        await client.createCollection(COLLECTION_NAME, [
+          { name: "status", type: "text", required: true },
+          { name: "total", type: "int" },
+          { name: "region", type: "text" }
+        ]);
+        await client.createIndex(COLLECTION_NAME, { name: "idx_status", fields: ["status"] });
+        await client.createIndex(COLLECTION_NAME, { name: "idx_total", fields: ["total"] });
         log("SYSTEM", `Schema verified for '${COLLECTION_NAME}'`);
       } catch (e) {
         console.warn("Schema check warning:", e);
@@ -287,29 +277,20 @@
             region: randomItem(REGIONS),
             customerName: randomItem(NAMES),
           };
-
           await client.setDocument(COLLECTION_NAME, id, order);
           activeIds.push(id);
-          log(
-            "INSERT",
-            `Created <b>#${id}</b> (${order.region}, $${order.total})`
-          );
+          log("INSERT", `Created <b>#${id}</b> (${order.region}, $${order.total})`);
         } else if (rand < 0.8) {
           // --- UPDATE ---
           const id = randomItem(activeIds);
           const updateType = Math.random();
-
           if (updateType < 0.5) {
             const newStatus = randomItem(STATUSES);
-            await client.updateDocument(COLLECTION_NAME, id, {
-              status: newStatus,
-            });
+            await client.updateDocument(COLLECTION_NAME, id, { status: newStatus });
             log("UPDATE", `Changed <b>#${id}</b> status to '${newStatus}'`);
           } else {
             const newTotal = randomInt(10, 2000);
-            await client.updateDocument(COLLECTION_NAME, id, {
-              total: newTotal,
-            });
+            await client.updateDocument(COLLECTION_NAME, id, { total: newTotal });
             log("UPDATE", `Changed <b>#${id}</b> total to $${newTotal}`);
           }
         } else {
@@ -325,6 +306,78 @@
         log("ERROR", err.message);
       }
     }
+
+    // --- BATCH HANDLER ---
+    btnBatch.addEventListener('click', async () => {
+      const operations = [];
+      const newIds = [];
+      const deletedIds = [];
+
+      // 1. Queue 5 INSERTS
+      for (let i = 0; i < 5; i++) {
+        const id = `batch_${Date.now()}_${i}`;
+        newIds.push(id);
+        operations.push({
+          method: 'PUT',
+          collection: COLLECTION_NAME,
+          docId: id,
+          data: {
+            status: 'pending',
+            total: randomInt(500, 5000),
+            region: 'EU',
+            customerName: 'Batch Import'
+          }
+        });
+      }
+
+      // 2. Queue 3 UPDATES (if available)
+      if (activeIds.length > 0) {
+        for (let i = 0; i < 3; i++) {
+          const id = activeIds[randomInt(0, activeIds.length - 1)];
+          if (id && !deletedIds.includes(id)) {
+            operations.push({
+              method: 'PATCH',
+              collection: COLLECTION_NAME,
+              docId: id,
+              data: { status: 'shipped', total: 9999 }
+            });
+          }
+        }
+      }
+
+      // 3. Queue 2 DELETES (if available)
+      if (activeIds.length > 0) {
+        for (let i = 0; i < 2; i++) {
+          const id = activeIds[randomInt(0, activeIds.length - 1)];
+          if (id && !deletedIds.includes(id)) {
+            deletedIds.push(id);
+            operations.push({
+              method: 'DELETE',
+              collection: COLLECTION_NAME,
+              docId: id
+            });
+          }
+        }
+      }
+
+      try {
+        log("BATCH", `Sending ${operations.length} operations atomically...`);
+        const res = await client.batch(operations);
+
+        if (res.status === 'success') {
+          activeIds.push(...newIds);
+          // Remove deleted IDs from local tracking
+          activeIds = activeIds.filter(id => !deletedIds.includes(id));
+          countDisplay.textContent = activeIds.length;
+
+          log("BATCH", `✅ Success! Created ${newIds.length}, Updated mixed, Deleted ${deletedIds.length}.`);
+        }
+      } catch (e) {
+        log("ERROR", "Batch failed: " + e.message);
+      }
+    });
+
+    // --- Other Handlers ---
 
     slider.addEventListener("input", (e) => {
       speedLabel.textContent = e.target.value;
@@ -354,13 +407,7 @@
     });
 
     btnSetup.addEventListener("click", async () => {
-      if (
-        !confirm(
-          `⚠️ Resetting will DELETE all data in '${COLLECTION_NAME}'. Continue?`
-        )
-      )
-        return;
-
+      if (!confirm(`⚠️ Resetting will DELETE all data in '${COLLECTION_NAME}'. Continue?`)) return;
       log("SYSTEM", "Resetting database schema...");
       try {
         await client.deleteCollection(COLLECTION_NAME).catch(() => { });

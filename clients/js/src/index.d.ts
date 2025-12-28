@@ -200,6 +200,20 @@ export interface IndexOptions {
   unique?: boolean;
 }
 
+/**
+ * Defines a single operation within a batch request.
+ */
+export interface BatchOperation {
+  /** The HTTP verb corresponding to the action (PUT=Upsert, PATCH=Update, DELETE=Delete). */
+  method: "PUT" | "PATCH" | "DELETE";
+  /** The target collection. */
+  collection: string;
+  /** The target document ID. */
+  docId: string;
+  /** The data payload (Required for PUT/PATCH, ignored for DELETE). */
+  data?: any;
+}
+
 // --- Response Types ---
 
 export interface CollectionCreationResponse {
@@ -239,6 +253,12 @@ export interface HealthStatus {
   status: string;
   database: string;
 }
+
+export interface BatchResponse {
+  status: "success";
+  count: number;
+}
+
 
 // =============================================================================
 // 4. CLASSES
@@ -369,6 +389,14 @@ export class RealTimeSQLite {
     collection: string,
     docId: string
   ): Promise<DeleteDocumentResponse>;
+
+  /**
+   * Executes multiple modification operations in a single atomic transaction.
+   * If any operation fails, the entire batch is rolled back.
+   *
+   * @param operations - Array of operations to perform.
+   */
+  batch(operations: BatchOperation[]): Promise<BatchResponse>;
 
   /**
    * Executes a one-time query via REST.
