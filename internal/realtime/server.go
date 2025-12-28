@@ -38,7 +38,10 @@ func Server(db *sql.DB, host string, port uint16, numShards uint32) {
 	// 4. Run the cleanup janitor in its own goroutine.
 	RunChangelogJanitor(db, 24*time.Hour, 1*time.Hour)
 
-	// 5. Register API and WebSocket routes
+	// 5. Wal Checkpoint
+	PassiveWalCheckpointer(db, 30*time.Second)
+
+	// 6. Register API and WebSocket routes
 	mux := http.NewServeMux()
 
 	// == System Route ==
@@ -110,7 +113,7 @@ func Server(db *sql.DB, host string, port uint16, numShards uint32) {
 		host = "localhost"
 	}
 
-	// 6. Start the server
+	// 7. Start the server
 	log.Printf("Server starting on http://%s:%d...\n", host, port)
 	if err := http.ListenAndServe(fmt.Sprintf("%s:%d", host, port), mux); err != nil {
 		log.Fatalf("Server failed to start: %v", err)

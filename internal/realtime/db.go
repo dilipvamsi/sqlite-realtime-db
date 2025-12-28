@@ -64,9 +64,9 @@ func InitDB(mainPath, logPath string) *sql.DB {
 
 	// 4. Initialize Schemas
 
-    // A. Audit Schema (Changelog + State)
-    // We group these because the State relies on the Changelog IDs.
-    auditSchema := `
+	// A. Audit Schema (Changelog + State)
+	// We group these because the State relies on the Changelog IDs.
+	auditSchema := `
     CREATE TABLE IF NOT EXISTS audit.changelog (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
@@ -85,9 +85,9 @@ func InitDB(mainPath, logPath string) *sql.DB {
     INSERT OR IGNORE INTO audit.system_state (key, value) VALUES ('last_processed_changelog_id', '0');
     `
 
-    // B. System Metadata (Main DB)
-    // Schema definitions belong with the data in Main
-    metaSchema := `
+	// B. System Metadata (Main DB)
+	// Schema definitions belong with the data in Main
+	metaSchema := `
     CREATE TABLE IF NOT EXISTS main.system_schema (
         name TEXT PRIMARY KEY,
         schema JSON NOT NULL,
@@ -141,6 +141,23 @@ func RunChangelogJanitor(db *sql.DB, retentionPeriod time.Duration, cleanupInter
 				}
 			} else {
 				log.Printf("Janitor Error: %v", err)
+			}
+		}
+	}()
+}
+
+// PassiveWalCheckpointer runs a background checkpoint to keep the WAL file size in check
+// without blocking concurrent readers or writers. This helps maintain a smooth p99 latency curve.
+func PassiveWalCheckpointer(db *sql.DB, checkPointDuration time.Duration) {
+	log.Printf("WAL passive checkpointer started. Interval: %v", checkPointDuration)
+	go func() {
+		ticker := time.NewTicker(checkPointDuration)
+		defer ticker.Stop()
+		for range ticker.C {
+			// PASSIVE: Do as much work as possible without blocking writers.
+			// It syncs pages from WAL to Main DB that are not currently in use.
+			if _, err := db.Exec("PRAGMA wal_checkpoint(PASSIVE);"); err != nil {
+				log.Printf("WAL Checkpoint Error: %v", err)
 			}
 		}
 	}()
