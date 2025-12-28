@@ -9,6 +9,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/tidwall/gjson v1.18.0
 	github.com/tidwall/sjson v1.2.5
+	golang.org/x/sync v0.19.0
 )
 
 require (

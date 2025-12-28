@@ -20,6 +20,7 @@ It combines the simplicity of SQLite with the reactivity of Firebase, engineered
     *   **Multi-Hub Sharding:** Distributes WebSocket connections across CPU cores to eliminate lock contention.
     *   **Zero-Allocation Broadcast:** Uses `PreparedMessage` to frame WebSocket packets once per topic, copying bytes directly to 50k+ clients.
     *   **Application-Side CDC:** Bypasses slow SQLite triggers by handling Change Data Capture logic in Go.
+    *   **SingleFlight:** Coalesces concurrent read requests ("Thundering Herds") into a single database query.
     *   **Split Storage:** Automatically strips promoted fields from the JSON blob to save disk space and IO.
 *   **🛠 Built-in Tools:**
     *   **Studio:** A visual dashboard to manage data and debug queries (`/studio`).
@@ -166,6 +167,16 @@ Instead of slow SQL Triggers, the Go application handles the logic:
 The WebSocket Hub is sharded (default 16 shards) based on Collection Name hash.
 *   **Benefit:** A massive broadcast on the `orders` collection does not block a user subscribing to `chats`.
 *   **Scalability:** Allows the Go runtime to schedule query matching across all available CPU cores.
+
+### 4. SingleFlight (Request Coalescing)
+To protect the database during "Thundering Herd" events (e.g., thousands of clients reconnecting simultaneously):
+*   **Mechanism:** If 5,000 clients request the exact same query snapshot at the same time, the server executes the SQL **once**.
+*   **Result:** The memory buffer is shared across all 5,000 goroutines. Memory allocation drops from O(N) to O(1), virtually eliminating Garbage Collection spikes.
+
+### 5. Passive WAL Checkpointing
+A background janitor runs `PRAGMA wal_checkpoint(PASSIVE)` on a timer.
+*   **Why:** Standard SQLite checkpoints can sometimes block readers/writers if the WAL grows too large.
+*   **Benefit:** This keeps the WAL file compact and ensures consistent p99 write latency without "stuttering" during heavy load.
 
 ---
 

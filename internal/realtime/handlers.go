@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // StorageTimeFormat defines the strict ISO8601 format used for storing datetimes.
@@ -998,6 +1000,8 @@ func healthHandler(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+var queryRequestGroup singleflight.Group
+
 // queryHandler executes a read-only QueryDSL request against a collection.
 // Route: POST /db/query/{collection}
 func queryHandler(db *sql.DB) http.HandlerFunc {
@@ -1044,51 +1048,66 @@ func queryHandler(db *sql.DB) http.HandlerFunc {
 		// This avoids changing the signature of buildQuery while supporting Split Storage.
 		sqlQuery = strings.Replace(sqlQuery, "SELECT id, json(data)", selectClause, 1)
 
-		// 5. Execute Query
-		rows, err := db.Query(sqlQuery, args...)
+		// --- SINGLEFLIGHT START ---
+		// Create a unique key for this exact query + args
+		// Key must include collection, SQL, and Args
+		sfKey := fmt.Sprintf("rest:%s:%s:%v", collection, sqlQuery, args)
+
+		data, err, _ := queryRequestGroup.Do(sfKey, func() (any, error) {
+			// 5. Execute Query
+			rows, err := db.Query(sqlQuery, args...)
+			if err != nil {
+				http.Error(w, "Execution Error: "+err.Error(), 500)
+				return nil, err
+			}
+			defer rows.Close()
+
+			// 6. Process Results
+			results := make([]Document, 0, 50) // Pre-allocate assuming limit is small
+
+			for rows.Next() {
+				// Prepare destination pointers
+				// [0]=id, [1]=dataBlob, [2...N]=columns
+				scanDest := make([]any, len(selectCols))
+				var id string
+				var dataBlob []byte
+				scanDest[0] = &id
+				scanDest[1] = &dataBlob
+
+				// Interface pointers for dynamic columns
+				colValues := make([]any, len(fields))
+				for i := range fields {
+					scanDest[i+2] = &colValues[i]
+				}
+
+				if err := rows.Scan(scanDest...); err != nil {
+					continue
+				}
+
+				// 7. Reconstruct the Full Document (Optimized Zero-Parse Splicing)
+				finalJSON, err := constructDocumentJSON(dataBlob, fields, colValues)
+				if err != nil {
+					continue
+				}
+
+				// Append to result list
+				results = append(results, Document{
+					ID:   id,
+					Data: json.RawMessage(finalJSON),
+				})
+			}
+			return results, nil
+		})
+
+		// --- SINGLEFLIGHT END ---
+
 		if err != nil {
 			http.Error(w, "Execution Error: "+err.Error(), 500)
 			return
 		}
-		defer rows.Close()
-
-		// 6. Process Results
-		results := make([]Document, 0, 50) // Pre-allocate assuming limit is small
-
-		for rows.Next() {
-			// Prepare destination pointers
-			// [0]=id, [1]=dataBlob, [2...N]=columns
-			scanDest := make([]any, len(selectCols))
-			var id string
-			var dataBlob []byte
-			scanDest[0] = &id
-			scanDest[1] = &dataBlob
-
-			// Interface pointers for dynamic columns
-			colValues := make([]any, len(fields))
-			for i := range fields {
-				scanDest[i+2] = &colValues[i]
-			}
-
-			if err := rows.Scan(scanDest...); err != nil {
-				continue
-			}
-
-			// 7. Reconstruct the Full Document (Optimized Zero-Parse Splicing)
-			finalJSON, err := constructDocumentJSON(dataBlob, fields, colValues)
-			if err != nil {
-				continue
-			}
-
-			// Append to result list
-			results = append(results, Document{
-				ID:   id,
-				Data: json.RawMessage(finalJSON),
-			})
-		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(results)
+		json.NewEncoder(w).Encode(data)
 	}
 }
 

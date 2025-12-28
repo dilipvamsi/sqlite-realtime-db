@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	json "github.com/goccy/go-json"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/gorilla/websocket"
 )
@@ -331,16 +332,6 @@ func (c *Client) getTopicAndHash(sub Subscription) (string, uint64, error) {
 }
 
 // writePump sends messages from the hub to a client's WebSocket connection.
-// func (c *Client) writePump() {
-// 	defer c.conn.Close()
-// 	for message := range c.send {
-// 		if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-// 			return
-// 		}
-// 	}
-// }
-
-// writePump sends messages from the hub to a client's WebSocket connection.
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -404,6 +395,9 @@ func unsafeStringToRawJson(s string) json.RawMessage {
 	// unsafe.Slice creates a new slice backed by the same memory.
 	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
+
+// requestGroup manages request coalescing to prevent thundering herds on DB reads.
+var requestGroup singleflight.Group
 
 // fetchInitialData bootstraps a subscription with full server-side protection
 // and correctly handles client-provided limit and offset.
@@ -486,51 +480,80 @@ func (c *Client) fetchInitialData(db *sql.DB, sub Subscription) {
 		paginatedQuery := fmt.Sprintf("%s LIMIT ? OFFSET ?;", baseQuery)
 		queryArgs := append(args, currentBatchSize, currentOffset)
 
-		rows, err := dbQuery(db, paginatedQuery, queryArgs...)
+		// --- SINGLEFLIGHT OPTIMIZATION START ---
+
+		// 1. Create a unique key for this exact query + args
+		// We use the query string + the string representation of args
+		sfKey := fmt.Sprintf("%s|%v", paginatedQuery, queryArgs)
+
+		// 2. Execute via Group.Do
+		// If 1000 clients ask for this same page at once, only ONE func executes.
+		// The result is shared with all 1000.
+		data, err, shared := requestGroup.Do(sfKey, func() (any, error) {
+
+			// This closure contains the heavy lifting: DB Query + JSON Reconstruction
+			rows, err := dbQuery(db, paginatedQuery, queryArgs...)
+			if err != nil {
+				log.Printf("Error fetching batch for sub %s: %v", sub.ID, err)
+				return nil, err
+			}
+			defer rows.Close()
+
+			// Prepare Scan Destinations (Reuse per batch)
+			// [0]=id, [1]=dataBlob, [2...N]=columns
+			scanDest := make([]any, len(selectCols))
+			var id string
+			var rawBlob []byte
+			scanDest[0] = &id
+			scanDest[1] = &rawBlob
+
+			// Interface pointers for dynamic columns
+			colValues := make([]any, len(fields))
+			for i := range fields {
+				scanDest[i+2] = &colValues[i]
+			}
+
+			batch := make([]Document, 0, currentBatchSize)
+			rowsInBatch := 0
+
+			for rows.Next() {
+				rowsInBatch++
+
+				if err := rows.Scan(scanDest...); err != nil {
+					log.Printf("Error scanning initial data row: %v", err)
+					continue
+				}
+
+				// RECONSTRUCTION: Merge columns back into JSON
+				finalJSON, err := constructDocumentJSON(rawBlob, fields, colValues)
+				if err != nil {
+					log.Printf("Error constructing document JSON: %v", err)
+					continue
+				}
+
+				doc := Document{
+					ID:   id,
+					Data: json.RawMessage(finalJSON),
+				}
+				batch = append(batch, doc)
+			}
+			return batch, nil
+		})
+
 		if err != nil {
 			log.Printf("Error fetching batch for sub %s: %v", sub.ID, err)
 			break
 		}
 
-		// Prepare Scan Destinations (Reuse per batch)
-		// [0]=id, [1]=dataBlob, [2...N]=columns
-		scanDest := make([]any, len(selectCols))
-		var id string
-		var rawBlob []byte
-		scanDest[0] = &id
-		scanDest[1] = &rawBlob
+		batch := data.([]Document)
+		rowsInBatch := len(batch)
 
-		// Interface pointers for dynamic columns
-		colValues := make([]any, len(fields))
-		for i := range fields {
-			scanDest[i+2] = &colValues[i]
+		// Optional: Debug logging to verify it works
+		if shared && rowsInBatch > 0 {
+			log.Printf("SingleFlight shared result for %s (Items: %d)", sub.Collection, rowsInBatch)
 		}
 
-		batch := make([]Document, 0, currentBatchSize)
-		rowsInBatch := 0
-
-		for rows.Next() {
-			rowsInBatch++
-
-			if err := rows.Scan(scanDest...); err != nil {
-				log.Printf("Error scanning initial data row: %v", err)
-				continue
-			}
-
-			// RECONSTRUCTION: Merge columns back into JSON
-			finalJSON, err := constructDocumentJSON(rawBlob, fields, colValues)
-			if err != nil {
-				log.Printf("Error constructing document JSON: %v", err)
-				continue
-			}
-
-			doc := Document{
-				ID:   id,
-				Data: json.RawMessage(finalJSON),
-			}
-			batch = append(batch, doc)
-		}
-		rows.Close()
+		// --- SINGLEFLIGHT OPTIMIZATION END ---
 
 		if rowsInBatch > 0 {
 			c.sendBatch(sub, batch)
