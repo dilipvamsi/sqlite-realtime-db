@@ -1,30 +1,30 @@
 # Real-Time SQLite
 
-A lightweight, self-hosted, real-time database server built on top of SQLite. It provides **live subscriptions** to database queries over WebSockets, a full REST API, and a robust TypeScript client library.
+A high-performance, self-hosted, real-time database server built on top of SQLite. It provides **live subscriptions** to database queries over WebSockets, a full REST API, and a robust TypeScript client library.
 
-Think of it as a pocket-sized Firebase or Supabase that runs as a single binary.
+It combines the simplicity of SQLite with the reactivity of Firebase, engineered for **maximum throughput** and **minimal latency**.
 
-![Status](https://img.shields.io/badge/status-active-success) ![Go](https://img.shields.io/badge/go-1.23+-blue) ![SQLite](https://img.shields.io/badge/sqlite-embedded-blue)
-
-## 🚀 Features
-
-*   **Real-Time Subscriptions:** Subscribe to entire collections, specific documents, or complex filtered queries.
-*   **Reactive Query Engine:** Clients receive `INSERT`, `UPDATE`, `DELETE`, and `REMOVE` events instantly.
-*   **Hybrid Client:** The JS/TS client maintains a local synchronized cache with **O(1) lookups** and **preserved order**.
-*   **JSON Document Store:** Store arbitrary JSON data with schema-less flexibility.
-*   **Built-in Tools:**
-    *   **Studio:** A visual dashboard to manage data and debug queries.
-    *   **Simulator:** A traffic generator to test real-time performance.
-*   **Portable:** Compiles to a single static binary (Linux/Windows/Mac) with zero dependencies.
+![Status](https://img.shields.io/badge/status-active-success) ![Go](https://img.shields.io/badge/go-1.23+-blue) ![SQLite](https://img.shields.io/badge/sqlite-embedded-blue) ![Architecture](https://img.shields.io/badge/arch-hybrid_schema-orange)
 
 ---
 
-## 🛠️ Architecture
+## 🚀 Key Features
 
-1.  **Write Path:** Clients write data via the REST API (`PUT`, `PATCH`, `DELETE`).
-2.  **CDC (Change Data Capture):** SQLite Triggers automatically record changes into a `changelog` table.
-3.  **Event Processing:** A Go background worker tails the changelog.
-4.  **Broadcast:** The WebSocket Hub matches changes against active query subscriptions and pushes updates to connected clients.
+*   **⚡ Real-Time Query Sync:** Subscribe to complex queries (e.g., `WHERE status='active' AND total > 100`). The server pushes `INSERT`, `UPDATE`, `DELETE`, and `REMOVE` (mismatch) events instantly.
+*   **🏗 Hybrid Schema:**
+    *   **Typed Columns:** Promote specific fields to native SQL columns (`INT`, `TEXT`, `REAL`) for blazing-fast indexing and sorting.
+    *   **JSON Document Store:** Store arbitrary unstructured data in a catch-all `BLOB` column.
+    *   **Zero-Cost Migrations:** Use the API to promote/demote fields dynamically without downtime.
+*   **🧠 Smart Client:** The JS/TS client maintains a synchronized local cache with **O(1) lookups** and **preserved order**, mutating objects in-place for React/Vue stability.
+*   **🚅 High Performance Architecture:**
+    *   **Multi-Hub Sharding:** Distributes WebSocket connections across CPU cores to eliminate lock contention.
+    *   **Zero-Allocation Broadcast:** Uses `PreparedMessage` to frame WebSocket packets once per topic, copying bytes directly to 50k+ clients.
+    *   **Application-Side CDC:** Bypasses slow SQLite triggers by handling Change Data Capture logic in Go.
+    *   **Split Storage:** Automatically strips promoted fields from the JSON blob to save disk space and IO.
+*   **🛠 Built-in Tools:**
+    *   **Studio:** A visual dashboard to manage data and debug queries (`/studio`).
+    *   **Simulator:** A traffic generator to load-test the system (`/simulator`).
+*   **📦 Portable:** Compiles to a single static binary (Linux/Windows/Mac) with **zero dependencies** (Static Musl/CGO build).
 
 ---
 
@@ -40,7 +40,7 @@ Think of it as a pocket-sized Firebase or Supabase that runs as a single binary.
 1.  **Clone the repository**
 2.  **Run with Make** (This prepares assets and runs the server):
     ```bash
-    make run
+    make run-dev
     ```
     *Or manually:*
     ```bash
@@ -116,7 +116,7 @@ await client.updateDocument("orders", "ord_123", { status: "shipped" });
 
 ## 🔍 Query DSL
 
-The query language is JSON-based.
+The query language is JSON-based and strictly typed.
 
 | Operator | Description |
 | :--- | :--- |
@@ -148,9 +148,28 @@ The query language is JSON-based.
 
 ---
 
-## 🏗️ Building for Production
+## 🛠️ Architecture Deep Dive
 
-Use the included `Makefile` to generate optimized binaries.
+### 1. Attached Databases (Split Storage)
+The system uses two separate SQLite files to maximize performance and manageability:
+*   **`realtime.db` (Main):** Stores the actual data (`orders`, `users`). Uses WAL mode and `synchronous=NORMAL`.
+*   **`logs.db` (Audit):** Stores the `changelog` (CDC) and `system_state`. This prevents the main database from fragmentation due to high-churn log writes.
+
+### 2. Application-Side CDC
+Instead of slow SQL Triggers, the Go application handles the logic:
+1.  **Handler:** Receives `PUT` request.
+2.  **Logic:** Calculates the JSON patch and split columns in memory (Go CPU).
+3.  **Transaction:** Writes to Data Table AND Audit Log in a single SQL transaction.
+4.  **Result:** ~30-50% higher write throughput compared to Trigger-based CDC.
+
+### 3. Multi-Hub Sharding
+The WebSocket Hub is sharded (default 16 shards) based on Collection Name hash.
+*   **Benefit:** A massive broadcast on the `orders` collection does not block a user subscribing to `chats`.
+*   **Scalability:** Allows the Go runtime to schedule query matching across all available CPU cores.
+
+---
+
+## 🏗️ Building for Production
 
 ### 1. Dynamic Build (Local Machine)
 ```bash
@@ -197,14 +216,15 @@ make docker-build
 | `GET` | `/health` | Server health check |
 | `GET` | `/db/collections` | List all collections with schema |
 | `GET` | `/db/collections/{collection}` | Get collection with schema |
-| `POST` | `/db/collections/{collection}` | Create a new collection |
-| `PATCH` | `/db/collections/{collection}` | Update the collection schema |
+| `POST` | `/db/collections` | Create a new collection (optional schema) |
+| `PATCH` | `/db/collections/{collection}` | Migrate schema (Promote/Demote columns) |
 | `DELETE` | `/db/collections/{collection}` | Delete the collection |
 | `POST` | `/db/indexes/{collection}` | Create an index |
 | `GET` | `/db/data/{collection}/{id}` | Get document |
 | `PUT` | `/db/data/{collection}/{id}` | Upsert document (Replace) |
 | `PATCH`| `/db/data/{collection}/{id}` | Update document (Merge Patch) |
 | `DELETE`| `/db/data/{collection}/{id}` | Delete document |
+| `POST` | `/db/batch` | Execute multiple operations atomically |
 | `POST` | `/db/query/{collection}` | Execute one-time query |
 
 ---

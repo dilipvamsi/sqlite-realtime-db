@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cespare/xxhash/v2"
 	json "github.com/goccy/go-json"
 
 	"github.com/gorilla/websocket"
@@ -43,9 +44,89 @@ type Hub struct {
 	mu            sync.RWMutex
 }
 
+// MultiHub manages multiple Hub shards to reduce lock contention.
+type MultiHub struct {
+	shards []*Hub
+
+	// Cache: Collection Name -> Shard Index
+	// Used to avoid re-hashing known collections repeatedly,
+	// though xxhash is fast, this fulfills the caching requirement.
+	collToShard map[string]uint32
+	mu          sync.RWMutex
+
+	numShards uint32
+}
+
+func NewMultiHub(numShards uint32) *MultiHub {
+	mh := &MultiHub{
+		shards:      make([]*Hub, numShards),
+		collToShard: make(map[string]uint32),
+		numShards:   numShards,
+	}
+
+	for i := range numShards {
+		mh.shards[i] = newHub()
+	}
+	return mh
+}
+
+// Run starts all hub shards in separate goroutines.
+func (mh *MultiHub) Run() {
+	for _, h := range mh.shards {
+		go h.run()
+	}
+	log.Printf("MultiHub started with %d shards", mh.numShards)
+}
+
+// GetCollectionShard determines which Hub handles a specific collection.
+// It uses a Read/Write lock optimization for the cache.
+func (mh *MultiHub) GetCollectionShard(collection string) *Hub {
+	// 1. Fast Path: Read Lock
+	mh.mu.RLock()
+	idx, exists := mh.collToShard[collection]
+	mh.mu.RUnlock()
+
+	if exists {
+		return mh.shards[idx]
+	}
+
+	// 2. Slow Path: Write Lock
+	// Calculate Hash using xxHash (Very fast)
+	hash := xxhash.Sum64String(collection)
+	// Map hash to shard index
+	newIdx := uint32(hash % uint64(mh.numShards))
+
+	mh.mu.Lock()
+	mh.collToShard[collection] = newIdx
+	mh.mu.Unlock()
+
+	return mh.shards[newIdx]
+}
+
+// RegisterClient adds a client to a SPECIFIC shard based on the collection they want.
+func (mh *MultiHub) RegisterSubscription(client *Client, collection string) {
+	shard := mh.GetCollectionShard(collection)
+	shard.register <- client
+}
+
+// UnregisterClient removes a client from a SPECIFIC shard.
+func (mh *MultiHub) UnregisterSubscription(client *Client, collection string) {
+	shard := mh.GetCollectionShard(collection)
+	shard.unregister <- client
+}
+
+// RemoveClientFromAll is called when a WebSocket disconnects.
+// Since a client might be listening to collections across DIFFERENT shards,
+// we must notify ALL shards to clean up this client pointer.
+func (mh *MultiHub) RemoveClientFromAll(client *Client) {
+	for _, h := range mh.shards {
+		h.unregister <- client
+	}
+}
+
 // Client represents a connected WebSocket client and its set of subscriptions.
 type Client struct {
-	hub          *Hub
+	multiHub     *MultiHub
 	conn         *websocket.Conn
 	send         chan []byte
 	sendPrepared chan *websocket.PreparedMessage
@@ -343,7 +424,8 @@ func (h *Hub) cleanupClient(client *Client) {
 			}
 		}
 		delete(h.clients, client)
-		close(client.send)
+		// close(client.send)
+		// close(client.sendPrepared)
 	}
 }
 

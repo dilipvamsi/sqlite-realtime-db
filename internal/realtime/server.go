@@ -17,7 +17,9 @@ var publicFs embed.FS
 
 var IsSqlLoggingEnabled = false
 
-func Server(db *sql.DB, host string, port uint16) {
+// Server initializes and starts the HTTP and WebSocket server.
+// numShards determines how many internal Hubs are created to reduce lock contention.
+func Server(db *sql.DB, host string, port uint16, numShards uint32) {
 
 	// 1. Register the hook for changelog
 	// RegisterChangelogHook(db)
@@ -27,11 +29,11 @@ func Server(db *sql.DB, host string, port uint16) {
 	}
 
 	// 2. Initialize and run the WebSocket Hub in its own goroutine.
-	hub := newHub()
-	go hub.run()
+	multiHub := NewMultiHub(numShards)
+	multiHub.Run()
 
 	// 3. Run the event processor in its own goroutine.
-	go runEventProcessor(db, hub)
+	go runEventProcessor(db, multiHub)
 
 	// 4. Run the cleanup janitor in its own goroutine.
 	RunChangelogJanitor(db, 24*time.Hour, 1*time.Hour)
@@ -65,9 +67,9 @@ func Server(db *sql.DB, host string, port uint16) {
 	mux.HandleFunc("POST /db/query/{collection}", queryHandler(db))
 
 	// == Batch Route ==
-    mux.HandleFunc("POST /db/batch", batchHandler(db))
+	mux.HandleFunc("POST /db/batch", batchHandler(db))
 
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) { serveWs(hub, w, r, db) })
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) { serveWs(multiHub, w, r, db) })
 	publicFS, err := fs.Sub(publicFs, "public")
 	if err != nil {
 		log.Fatal(err)

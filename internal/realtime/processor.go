@@ -19,7 +19,7 @@ const batchSize = 1000
 
 // runEventProcessor waits for notifications from the database hook and processes
 // new changelog entries. It's designed to be crash-safe and durable.
-func runEventProcessor(db *sql.DB, hub *Hub) {
+func runEventProcessor(db *sql.DB, multiHub *MultiHub) {
 	// Initialize lastProcessedId from the database to make the processor crash-safe.
 	// This ensures that on restart, it picks up exactly where it left off.
 	var lastProcessedId int64
@@ -79,8 +79,12 @@ func runEventProcessor(db *sql.DB, hub *Hub) {
 				} else {
 					event.OldData = nil
 				}
+				// ROUTING LOGIC:
+				// Find the correct shard for this collection and send the event there.
+				// This allows shards to process matching logic in parallel.
+				collectionHub := multiHub.GetCollectionShard(event.Collection)
+				collectionHub.broadcast <- event
 
-				hub.broadcast <- event
 				newLastIdInBatch = eventDBId
 				eventsProcessedInBatch++
 			}

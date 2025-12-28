@@ -47,6 +47,187 @@ type IndexOptions struct {
 	Unique bool     `json:"unique"` // Enforce uniqueness constraint
 }
 
+// Operation on a specific document
+type BatchOperation struct {
+	Method     string          `json:"method"` // "PUT", "PATCH", "DELETE"
+	Collection string          `json:"collection"`
+	DocID      string          `json:"docId"`
+	Data       json.RawMessage `json:"data,omitempty"`
+}
+
+// BatchRequest is the list of all the operations
+type BatchRequest struct {
+	Operations []BatchOperation `json:"operations"`
+}
+
+// =============================================================================
+// VALIDATION LOGIC
+// =============================================================================
+
+func (r *CreateCollectionRequest) Validate() error {
+	// Track seen field names to enforce uniqueness
+	seen := make(map[string]bool, len(r.Schema))
+
+	for _, field := range r.Schema {
+		if !identifierSanitizer.MatchString(field.Name) {
+			return fmt.Errorf("invalid field name: '%s'", field.Name)
+		}
+
+		// Check for duplicates
+		if seen[field.Name] {
+			return fmt.Errorf("duplicate field name in schema: '%s'", field.Name)
+		}
+		seen[field.Name] = true
+
+		if !field.Type.IsValid() {
+			return fmt.Errorf("invalid type '%s' for field '%s'", field.Type, field.Name)
+		}
+	}
+	return nil
+}
+
+func (r *UpdateSchemaRequest) Validate() error {
+	// Map to track uniqueness across all operations: Name -> OperationType
+	seen := make(map[string]string)
+
+	// Helper to check uniqueness and format validity
+	checkName := func(name, opType string) error {
+		if !identifierSanitizer.MatchString(name) {
+			return fmt.Errorf("invalid field name in %s: '%s'", opType, name)
+		}
+		if prevOp, exists := seen[name]; exists {
+			return fmt.Errorf("field '%s' is ambiguous: appears in both '%s' and '%s'", name, prevOp, opType)
+		}
+		seen[name] = opType
+		return nil
+	}
+
+	// 1. Validate Additions
+	for _, f := range r.Add {
+		if err := checkName(f.Name, "add"); err != nil {
+			return err
+		}
+		if !f.Type.IsValid() {
+			return fmt.Errorf("invalid type for add field: %s", f.Name)
+		}
+	}
+
+	// 2. Validate Promotions
+	for _, f := range r.Promote {
+		if err := checkName(f.Name, "promote"); err != nil {
+			return err
+		}
+		if !f.Type.IsValid() {
+			return fmt.Errorf("invalid type for promote field: %s", f.Name)
+		}
+	}
+
+	// 3. Validate Demotions
+	for _, name := range r.Demote {
+		if err := checkName(name, "demote"); err != nil {
+			return err
+		}
+	}
+
+	// 4. Validate Deletions
+	for _, name := range r.Delete {
+		if err := checkName(name, "delete"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ValidateLogic checks stateful constraints against the current database schema.
+// It ensures we don't add duplicate columns or delete missing ones.
+func (r *UpdateSchemaRequest) ValidateLogic(currentFields []FieldDef) error {
+	// Create map for O(1) lookup
+	currentMap := make(map[string]struct{}, len(currentFields))
+	for _, f := range currentFields {
+		currentMap[f.Name] = struct{}{}
+	}
+
+	// 1. Check Add (Must NOT exist)
+	for _, f := range r.Add {
+		if _, exists := currentMap[f.Name]; exists {
+			return fmt.Errorf("cannot add field '%s': column already exists", f.Name)
+		}
+	}
+
+	// 2. Check Promote (Must NOT exist)
+	for _, f := range r.Promote {
+		if _, exists := currentMap[f.Name]; exists {
+			return fmt.Errorf("cannot promote field '%s': column already exists", f.Name)
+		}
+	}
+
+	// 3. Check Demote (Must exist)
+	for _, name := range r.Demote {
+		if _, exists := currentMap[name]; !exists {
+			return fmt.Errorf("cannot demote field '%s': column does not exist", name)
+		}
+	}
+
+	// 4. Check Delete (Must exist)
+	for _, name := range r.Delete {
+		if _, exists := currentMap[name]; !exists {
+			return fmt.Errorf("cannot delete field '%s': column does not exist", name)
+		}
+	}
+
+	return nil
+}
+
+func (r *IndexOptions) Validate() error {
+	if !identifierSanitizer.MatchString(r.Name) {
+		return fmt.Errorf("invalid index name: '%s'", r.Name)
+	}
+	if len(r.Fields) == 0 {
+		return fmt.Errorf("index must have at least one field")
+	}
+	for _, f := range r.Fields {
+		if !identifierSanitizer.MatchString(f) {
+			return fmt.Errorf("invalid indexed field name: '%s'", f)
+		}
+	}
+	return nil
+}
+
+func (r *BatchRequest) Validate() error {
+	if len(r.Operations) == 0 {
+		return fmt.Errorf("empty batch operations")
+	}
+
+	// Track seen documents to enforce uniqueness within the batch
+	seen := make(map[string]bool, len(r.Operations))
+
+	for i, op := range r.Operations {
+		// 1. Basic Field Validation
+		if !collectionNameSanitizer.MatchString(op.Collection) {
+			return fmt.Errorf("op %d: invalid collection '%s'", i, op.Collection)
+		}
+		if op.DocID == "" {
+			return fmt.Errorf("op %d: missing docId", i)
+		}
+
+		// 2. Uniqueness Check
+		// We use "collection/docId" as the unique key
+		key := op.Collection + "/" + op.DocID
+		if seen[key] {
+			return fmt.Errorf("op %d: duplicate document '%s' in batch (only one operation per document allowed)", i, key)
+		}
+		seen[key] = true
+
+		// 3. Method Validation
+		method := strings.ToUpper(op.Method)
+		if method != "PUT" && method != "PATCH" && method != "DELETE" {
+			return fmt.Errorf("op %d: invalid method '%s'", i, op.Method)
+		}
+	}
+	return nil
+}
+
 // validateAndNormalizeDateTime parses various date input formats and standardizes them
 // to a strict UTC ISO8601 format with milliseconds. This ensures data consistency.
 func validateAndNormalizeDateTime(input string) (string, error) {
@@ -76,6 +257,10 @@ func validateAndNormalizeDateTime(input string) (string, error) {
 	// Always convert to UTC and standardize format
 	return t.UTC().Format(StorageTimeFormat), nil
 }
+
+// =============================================================================
+// HANDLERS
+// =============================================================================
 
 // Queryer is an interface to allow helper functions to accept either *sql.DB or *sql.Tx.
 type Queryer interface {
@@ -151,19 +336,22 @@ func handleCreateCollection(db *sql.DB, w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Invalid JSON", 400)
 		return
 	}
+
+	if err := req.Validate(); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
 	collection := r.PathValue("collection")
 
 	// Sanity check to prevent SQL injection in table names
+	if collection == "" {
+		http.Error(w, "Collection name is required", 400)
+		return
+	}
 	if !collectionNameSanitizer.MatchString(collection) {
 		http.Error(w, "Invalid collection name", 400)
 		return
-	}
-	// Validate supported data types
-	for _, field := range req.Schema {
-		if !field.Type.IsValid() {
-			http.Error(w, fmt.Sprintf("Invalid type '%s' for field '%s'", field.Type, field.Name), 400)
-			return
-		}
 	}
 
 	// Serialize schema to store in metadata table
@@ -223,179 +411,6 @@ func handleCreateCollection(db *sql.DB, w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(map[string]string{"status": "created", "collection": collection})
 }
 
-// documentHandler is the main router for CRUD operations on documents.
-// Route: /db/data/{collection}/{docId}
-func documentHandler(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		collection := r.PathValue("collection")
-		if !collectionNameSanitizer.MatchString(collection) {
-			http.Error(w, "Invalid collection name", 400)
-			return
-		}
-		docID := r.PathValue("docId")
-		if docID == "" {
-			http.Error(w, "Document ID required", 400)
-			return
-		}
-
-		// Delegate to specific method handlers
-		switch r.Method {
-		case http.MethodGet:
-			getDocumentHandler(db).ServeHTTP(w, r)
-		case http.MethodPut:
-			setDocumentHandler(db).ServeHTTP(w, r)
-		case http.MethodPatch:
-			updateDocumentHandler(db).ServeHTTP(w, r)
-		case http.MethodDelete:
-			deleteDocumentHandler(db).ServeHTTP(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	}
-}
-
-// setDocumentHandler (PUT) performs an "Upsert" (Insert or Replace).
-// It implements "Application-Side CDC" (Change Data Capture) by writing to
-// both the Data table and the Audit Log in a single transaction.
-func setDocumentHandler(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		collection := r.PathValue("collection")
-		docID := r.PathValue("docId")
-
-		// Read the raw JSON body
-		bodyBytes, _ := io.ReadAll(r.Body)
-		if !json.Valid(bodyBytes) {
-			http.Error(w, "Invalid JSON", 400)
-			return
-		}
-
-		tx, err := db.Begin()
-		if err != nil {
-			http.Error(w, "DB Connection Error", 500)
-			return
-		}
-		defer tx.Rollback()
-
-		opType, err := ApplySetDocument(tx, collection, docID, bodyBytes)
-
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-
-		if err := tx.Commit(); err != nil {
-			http.Error(w, "Commit Failed", 500)
-			return
-		}
-		// Signal Event Processor
-		notifyUpdate()
-
-		w.Header().Set("Content-Type", "application/json")
-		if opType == "INSERT" {
-			w.WriteHeader(http.StatusCreated)
-		} else {
-			w.WriteHeader(http.StatusOK)
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "replaced", "id": docID, "operation": string(opType)})
-	}
-}
-
-// updateDocumentHandler handles PATCH requests for partial updates (Merge Patch).
-// It selectively updates columns that are present in the patch.
-func updateDocumentHandler(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		collection := r.PathValue("collection")
-		docID := r.PathValue("docId")
-
-		patchBytes, _ := io.ReadAll(r.Body)
-		if !json.Valid(patchBytes) {
-			http.Error(w, "Invalid JSON", 400)
-			return
-		}
-
-		tx, err := db.Begin()
-		if err != nil {
-			http.Error(w, "DB Error", 500)
-			return
-		}
-		defer tx.Rollback()
-
-		if err := ApplyUpdateDocument(tx, collection, docID, patchBytes); err != nil {
-			if strings.Contains(err.Error(), "not found") {
-				http.Error(w, err.Error(), 404)
-			} else {
-				http.Error(w, err.Error(), 500)
-			}
-			return
-		}
-
-		if err := tx.Commit(); err != nil {
-			http.Error(w, "Commit Failed", 500)
-			return
-		}
-
-		notifyUpdate()
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "patched", "id": docID})
-	}
-}
-
-// deleteDocumentHandler removes a document and logs the event.
-func deleteDocumentHandler(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		collection := r.PathValue("collection")
-		docID := r.PathValue("docId")
-
-		tx, err := db.Begin()
-		if err != nil {
-			http.Error(w, "DB Error", 500)
-			return
-		}
-		defer tx.Rollback()
-
-		if err := ApplyDeleteDocument(tx, collection, docID); err != nil {
-			if strings.Contains(err.Error(), "not found") {
-				http.Error(w, err.Error(), 404)
-			} else {
-				http.Error(w, err.Error(), 500)
-			}
-			return
-		}
-
-		if err := tx.Commit(); err != nil {
-			http.Error(w, "Commit Failed", 500)
-			return
-		}
-
-		notifyUpdate()
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": docID})
-	}
-}
-
-// getDocumentHandler retrieves a document by ID.
-// It reconstructs the full JSON object from the split storage (Blob + Columns).
-func getDocumentHandler(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		collection := r.PathValue("collection")
-		docID := r.PathValue("docId")
-		fields := GetCollectionFields(collection)
-
-		// Use the helper to fetch and merge data.
-		// fetchAndReconstruct accepts *sql.DB via the Queryer interface.
-		dataBlob, err := fetchAndReconstruct(db, collection, docID, fields)
-		if err != nil {
-			http.Error(w, "Not found", 404)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(dataBlob)
-	}
-}
-
 // handleGetAllCollections lists all managed collections and their schema definitions.
 // Route: GET /db/collections
 func handleGetAllCollections(db *sql.DB, w http.ResponseWriter) {
@@ -444,6 +459,17 @@ func handleGetAllCollections(db *sql.DB, w http.ResponseWriter) {
 // handleGetCollection lists all managed collections and their schema definitions.
 // Route: GET /db/collections/{collection}
 func handleGetCollection(db *sql.DB, w http.ResponseWriter, collection string) {
+
+	// Sanity check to prevent SQL injection in table names
+	if collection == "" {
+		http.Error(w, "Collection name is required", 400)
+		return
+	}
+	if !collectionNameSanitizer.MatchString(collection) {
+		http.Error(w, "Invalid collection name", 400)
+		return
+	}
+
 	// We query the system_schema table because it contains the 'schema' JSON blob
 	// which sqlite_master does not have.
 	rows, err := db.Query(`SELECT schema FROM main.system_schema where name = ?`, collection)
@@ -493,6 +519,17 @@ func handleGetCollection(db *sql.DB, w http.ResponseWriter, collection string) {
 func handleDeleteCollection(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 
 	collection := r.PathValue("collection")
+
+	// Sanity check to prevent SQL injection in table names
+	if collection == "" {
+		http.Error(w, "Collection name is required", 400)
+		return
+	}
+	if !collectionNameSanitizer.MatchString(collection) {
+		http.Error(w, "Invalid collection name", 400)
+		return
+	}
+
 	tx, _ := db.Begin()
 	// Drop Physical Table
 	tx.Exec(fmt.Sprintf("DROP TABLE IF EXISTS main.%s", collection))
@@ -529,83 +566,21 @@ func handleUpdateSchema(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 
 	// 3. Fetch Current Schema (Pre-computation)
 	fields := GetCollectionFields(collection)
+	if fields == nil {
+		http.Error(w, "Collection not found", 404)
+		return
+	}
+
+	// 4. Logic Validation (Stateful)
+	if err := req.ValidateLogic(fields); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
 
 	// Create a map for O(1) checks of existing columns
 	currentFieldMap := make(map[string]FieldDef)
 	for _, f := range fields {
 		currentFieldMap[f.Name] = f
-	}
-
-	// --- 4. PRE-FLIGHT VALIDATION (Fail Fast) ---
-
-	// A. Validate Promote (Must be new column, valid type)
-	for _, field := range req.Promote {
-		if !identifierSanitizer.MatchString(field.Name) {
-			http.Error(w, "Invalid promote field name: "+field.Name, 400)
-			return
-		}
-		if !field.Type.IsValid() {
-			http.Error(w, fmt.Sprintf("Invalid type for promoted field '%s'", field.Name), 400)
-			return
-		}
-		if _, exists := currentFieldMap[field.Name]; exists {
-			http.Error(w, fmt.Sprintf("Cannot promote field '%s': column already exists.", field.Name), 400)
-			return
-		}
-	}
-
-	// B. Validate Add (Must be new column, valid type)
-	for _, field := range req.Add {
-		if !identifierSanitizer.MatchString(field.Name) {
-			http.Error(w, "Invalid add field name: "+field.Name, 400)
-			return
-		}
-		if !field.Type.IsValid() {
-			http.Error(w, fmt.Sprintf("Invalid type for added field '%s'", field.Name), 400)
-			return
-		}
-		if _, exists := currentFieldMap[field.Name]; exists {
-			http.Error(w, fmt.Sprintf("Cannot add field '%s': column already exists.", field.Name), 400)
-			return
-		}
-		// Check against Promote list for duplicates in same request
-		for _, p := range req.Promote {
-			if p.Name == field.Name {
-				http.Error(w, fmt.Sprintf("Field '%s' cannot be in both Add and Promote lists.", field.Name), 400)
-				return
-			}
-		}
-	}
-
-	// C. Validate Demote (Must exist)
-	for _, name := range req.Demote {
-		if !identifierSanitizer.MatchString(name) {
-			http.Error(w, "Invalid demote field name: "+name, 400)
-			return
-		}
-		if _, exists := currentFieldMap[name]; !exists {
-			http.Error(w, fmt.Sprintf("Cannot demote field '%s': column does not exist.", name), 400)
-			return
-		}
-	}
-
-	// D. Validate Delete (Must exist)
-	for _, name := range req.Delete {
-		if !identifierSanitizer.MatchString(name) {
-			http.Error(w, "Invalid delete field name: "+name, 400)
-			return
-		}
-		if _, exists := currentFieldMap[name]; !exists {
-			http.Error(w, fmt.Sprintf("Cannot delete field '%s': column does not exist.", name), 400)
-			return
-		}
-		// Check against Demote list
-		for _, d := range req.Demote {
-			if d == name {
-				http.Error(w, fmt.Sprintf("Field '%s' cannot be in both Demote and Delete lists.", name), 400)
-				return
-			}
-		}
 	}
 
 	// --- 5. START TRANSACTION (BEGIN IMMEDIATE) ---
@@ -767,6 +742,179 @@ func handleUpdateSchema(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// documentHandler is the main router for CRUD operations on documents.
+// Route: /db/data/{collection}/{docId}
+func documentHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		collection := r.PathValue("collection")
+		if !collectionNameSanitizer.MatchString(collection) {
+			http.Error(w, "Invalid collection name", 400)
+			return
+		}
+		docID := r.PathValue("docId")
+		if docID == "" {
+			http.Error(w, "Document ID required", 400)
+			return
+		}
+
+		// Delegate to specific method handlers
+		switch r.Method {
+		case http.MethodGet:
+			getDocumentHandler(db).ServeHTTP(w, r)
+		case http.MethodPut:
+			setDocumentHandler(db).ServeHTTP(w, r)
+		case http.MethodPatch:
+			updateDocumentHandler(db).ServeHTTP(w, r)
+		case http.MethodDelete:
+			deleteDocumentHandler(db).ServeHTTP(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+// getDocumentHandler retrieves a document by ID.
+// It reconstructs the full JSON object from the split storage (Blob + Columns).
+func getDocumentHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		collection := r.PathValue("collection")
+		docID := r.PathValue("docId")
+		fields := GetCollectionFields(collection)
+
+		// Use the helper to fetch and merge data.
+		// fetchAndReconstruct accepts *sql.DB via the Queryer interface.
+		dataBlob, err := fetchAndReconstruct(db, collection, docID, fields)
+		if err != nil {
+			http.Error(w, "Not found", 404)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(dataBlob)
+	}
+}
+
+// setDocumentHandler (PUT) performs an "Upsert" (Insert or Replace).
+// It implements "Application-Side CDC" (Change Data Capture) by writing to
+// both the Data table and the Audit Log in a single transaction.
+func setDocumentHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		collection := r.PathValue("collection")
+		docID := r.PathValue("docId")
+
+		// Read the raw JSON body
+		bodyBytes, _ := io.ReadAll(r.Body)
+		if !json.Valid(bodyBytes) {
+			http.Error(w, "Invalid JSON", 400)
+			return
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, "DB Connection Error", 500)
+			return
+		}
+		defer tx.Rollback()
+
+		opType, err := ApplySetDocument(tx, collection, docID, bodyBytes)
+
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "Commit Failed", 500)
+			return
+		}
+		// Signal Event Processor
+		notifyUpdate()
+
+		w.Header().Set("Content-Type", "application/json")
+		if opType == "INSERT" {
+			w.WriteHeader(http.StatusCreated)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "replaced", "id": docID, "operation": string(opType)})
+	}
+}
+
+// updateDocumentHandler handles PATCH requests for partial updates (Merge Patch).
+// It selectively updates columns that are present in the patch.
+func updateDocumentHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		collection := r.PathValue("collection")
+		docID := r.PathValue("docId")
+
+		patchBytes, _ := io.ReadAll(r.Body)
+		if !json.Valid(patchBytes) {
+			http.Error(w, "Invalid JSON", 400)
+			return
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, "DB Error", 500)
+			return
+		}
+		defer tx.Rollback()
+
+		if err := ApplyUpdateDocument(tx, collection, docID, patchBytes); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				http.Error(w, err.Error(), 404)
+			} else {
+				http.Error(w, err.Error(), 500)
+			}
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "Commit Failed", 500)
+			return
+		}
+
+		notifyUpdate()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "patched", "id": docID})
+	}
+}
+
+// deleteDocumentHandler removes a document and logs the event.
+func deleteDocumentHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		collection := r.PathValue("collection")
+		docID := r.PathValue("docId")
+
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, "DB Error", 500)
+			return
+		}
+		defer tx.Rollback()
+
+		if err := ApplyDeleteDocument(tx, collection, docID); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				http.Error(w, err.Error(), 404)
+			} else {
+				http.Error(w, err.Error(), 500)
+			}
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "Commit Failed", 500)
+			return
+		}
+
+		notifyUpdate()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": docID})
+	}
+}
+
 // indexHandler creates a B-Tree index on specific fields.
 // It automatically detects if a field is a Native Column or a JSON path
 // and generates the appropriate CREATE INDEX SQL.
@@ -784,6 +932,11 @@ func indexHandler(db *sql.DB) http.HandlerFunc {
 		}
 		if !identifierSanitizer.MatchString(req.Name) {
 			http.Error(w, "Invalid index name", 400)
+			return
+		}
+
+		if err := req.Validate(); err != nil {
+			http.Error(w, err.Error(), 400)
 			return
 		}
 
@@ -979,22 +1132,16 @@ func constructDocumentJSON(rawBlob []byte, fields []FieldDef, colValues []any) (
 	return finalJSON, nil
 }
 
-type BatchOperation struct {
-	Method     string          `json:"method"` // "PUT", "PATCH", "DELETE"
-	Collection string          `json:"collection"`
-	DocID      string          `json:"docId"`
-	Data       json.RawMessage `json:"data,omitempty"`
-}
-
-type BatchRequest struct {
-	Operations []BatchOperation `json:"operations"`
-}
-
 func batchHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req BatchRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid JSON", 400)
+			return
+		}
+
+		if err := req.Validate(); err != nil {
+			http.Error(w, err.Error(), 400)
 			return
 		}
 

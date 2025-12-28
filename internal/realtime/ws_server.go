@@ -47,7 +47,7 @@ var upgrader = websocket.Upgrader{
 }
 
 // serveWs handles incoming WebSocket connections, creating a Client object for each.
-func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request, db *sql.DB) {
+func serveWs(multiHub *MultiHub, w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("Failed to upgrade connection:", err)
@@ -55,14 +55,13 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 
 	client := &Client{
-		hub:           hub,
+		multiHub:      multiHub,
 		conn:          conn,
 		send:          make(chan []byte, 256),                     // Buffered channel to prevent blocking the hub
 		sendPrepared:  make(chan *websocket.PreparedMessage, 256), // Buffered channel for prepared messages
 		topics:        make(map[string]bool),
 		subscriptions: make(SubscriptionTopics),
 	}
-	client.hub.register <- client
 
 	// Start the goroutines for reading and writing to this client's connection.
 	go client.writePump()
@@ -94,10 +93,13 @@ func canonicalizeWhereCondition(whereCondition *Where) (json.RawMessage, error) 
 // readPump is now a clean dispatcher. Its only job is to parse incoming
 // messages and delegate the work to the appropriate handler.
 func (c *Client) readPump(db *sql.DB) {
+
 	defer func() {
-		c.hub.unregister <- c
+		// When socket closes, we must ensure NO shard holds a reference to this client.
+		c.multiHub.RemoveClientFromAll(c)
 		c.conn.Close()
 	}()
+
 	c.conn.SetReadLimit(maxMessageSize)
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
@@ -174,8 +176,12 @@ func (c *Client) handleSubscribe(db *sql.DB, sub Subscription) {
 	})
 	c.send <- ack
 
-	c.hub.mu.Lock()
-	defer c.hub.mu.Unlock()
+	// SHARDING LOGIC:
+	// Find the specific Hub responsible for this collection
+	collectionHub := c.multiHub.GetCollectionShard(sub.Collection)
+
+	collectionHub.mu.Lock() // Lock the specific shard
+	defer collectionHub.mu.Unlock()
 
 	// This is our new error payload for duplicate subscriptions
 	sendDuplicateError := func(existingSubID string) {
@@ -188,38 +194,38 @@ func (c *Client) handleSubscribe(db *sql.DB, sub Subscription) {
 	}
 
 	if sub.Query != nil && sub.Query.Where != nil {
-		if c.hub.querySubscriptions[sub.Collection] == nil {
-			c.hub.querySubscriptions[sub.Collection] = make(QueryClientSubMap)
+		if collectionHub.querySubscriptions[sub.Collection] == nil {
+			collectionHub.querySubscriptions[sub.Collection] = make(QueryClientSubMap)
 		}
-		if c.hub.querySubscriptions[sub.Collection][hash] == nil {
-			c.hub.querySubscriptions[sub.Collection][hash] = make(ClientSubMap)
+		if collectionHub.querySubscriptions[sub.Collection][hash] == nil {
+			collectionHub.querySubscriptions[sub.Collection][hash] = make(ClientSubMap)
 		}
-		subs := c.hub.querySubscriptions[sub.Collection][hash]
+		subs := collectionHub.querySubscriptions[sub.Collection][hash]
 		if existingSubID, ok := subs[c]; ok {
 			sendDuplicateError(existingSubID)
 			return // REJECT
 		}
 		subs[c] = sub.ID
-		if c.hub.activeQueries[sub.Collection] == nil {
-			c.hub.activeQueries[sub.Collection] = make(map[uint64]*QueryDSL)
+		if collectionHub.activeQueries[sub.Collection] == nil {
+			collectionHub.activeQueries[sub.Collection] = make(map[uint64]*QueryDSL)
 		}
-		c.hub.activeQueries[sub.Collection][hash] = sub.Query
+		collectionHub.activeQueries[sub.Collection][hash] = sub.Query
 	} else if sub.DocID != "" {
 		docKey := fmt.Sprintf("%s:%s", sub.Collection, sub.DocID)
-		if c.hub.documentSubscriptions[docKey] == nil {
-			c.hub.documentSubscriptions[docKey] = make(ClientSubMap)
+		if collectionHub.documentSubscriptions[docKey] == nil {
+			collectionHub.documentSubscriptions[docKey] = make(ClientSubMap)
 		}
-		subs := c.hub.documentSubscriptions[docKey]
+		subs := collectionHub.documentSubscriptions[docKey]
 		if existingSubID, ok := subs[c]; ok {
 			sendDuplicateError(existingSubID)
 			return // REJECT
 		}
 		subs[c] = sub.ID
 	} else {
-		if c.hub.collectionSubscriptions[sub.Collection] == nil {
-			c.hub.collectionSubscriptions[sub.Collection] = make(ClientSubMap)
+		if collectionHub.collectionSubscriptions[sub.Collection] == nil {
+			collectionHub.collectionSubscriptions[sub.Collection] = make(ClientSubMap)
 		}
-		subs := c.hub.collectionSubscriptions[sub.Collection]
+		subs := collectionHub.collectionSubscriptions[sub.Collection]
 		if existingSubID, ok := subs[c]; ok {
 			sendDuplicateError(existingSubID)
 			return // REJECT
@@ -227,9 +233,12 @@ func (c *Client) handleSubscribe(db *sql.DB, sub Subscription) {
 		subs[c] = sub.ID
 	}
 
+	collectionHub.clients[c] = true
+
 	c.topics[topic] = true
 	c.subscriptions[sub.ID] = topic
 	log.Printf("Client %p subscribed to topic: %s", c, topic)
+
 	go c.fetchInitialData(db, sub)
 }
 
@@ -242,8 +251,12 @@ func (c *Client) handleUnsubscribe(sub Subscription) {
 		return
 	}
 
-	c.hub.mu.Lock()
-	defer c.hub.mu.Unlock()
+	// SHARDING LOGIC:
+	// Find the specific Hub responsible for this collection
+	collectionHub := c.multiHub.GetCollectionShard(sub.Collection)
+
+	collectionHub.mu.Lock() // Lock the specific shard
+	defer collectionHub.mu.Unlock()
 
 	// Only proceed if the client was actually subscribed to this topic.
 	if !c.topics[topic] {
@@ -251,39 +264,39 @@ func (c *Client) handleUnsubscribe(sub Subscription) {
 	}
 
 	if sub.Query != nil && sub.Query.Where != nil {
-		if queriesForCollection, ok := c.hub.querySubscriptions[sub.Collection]; ok {
+		if queriesForCollection, ok := collectionHub.querySubscriptions[sub.Collection]; ok {
 			if subs, ok := queriesForCollection[hash]; ok {
 				delete(subs, c)
 				if len(subs) == 0 {
 					log.Printf("Last client for query hash %d unsubscribed. Cleaning up.", hash)
 					delete(queriesForCollection, hash)
-					if activeQueriesForColl, ok := c.hub.activeQueries[sub.Collection]; ok {
+					if activeQueriesForColl, ok := collectionHub.activeQueries[sub.Collection]; ok {
 						delete(activeQueriesForColl, hash)
 					}
 					if len(queriesForCollection) == 0 {
-						delete(c.hub.querySubscriptions, sub.Collection)
+						delete(collectionHub.querySubscriptions, sub.Collection)
 					}
-					if len(c.hub.activeQueries[sub.Collection]) == 0 {
-						delete(c.hub.activeQueries, sub.Collection)
+					if len(collectionHub.activeQueries[sub.Collection]) == 0 {
+						delete(collectionHub.activeQueries, sub.Collection)
 					}
 				}
 			}
 		}
 	} else if sub.DocID != "" {
 		docKey := fmt.Sprintf("%s:%s", sub.Collection, sub.DocID)
-		if subs, ok := c.hub.documentSubscriptions[docKey]; ok {
+		if subs, ok := collectionHub.documentSubscriptions[docKey]; ok {
 			delete(subs, c)
 			if len(subs) == 0 {
 				log.Printf("Last client for document %s unsubscribed. Cleaning up.", topic)
-				delete(c.hub.documentSubscriptions, docKey)
+				delete(collectionHub.documentSubscriptions, docKey)
 			}
 		}
 	} else {
-		if subs, ok := c.hub.collectionSubscriptions[sub.Collection]; ok {
+		if subs, ok := collectionHub.collectionSubscriptions[sub.Collection]; ok {
 			delete(subs, c)
 			if len(subs) == 0 {
 				log.Printf("Last client for collection %s unsubscribed. Cleaning up.", topic)
-				delete(c.hub.collectionSubscriptions, sub.Collection)
+				delete(collectionHub.collectionSubscriptions, sub.Collection)
 			}
 		}
 	}

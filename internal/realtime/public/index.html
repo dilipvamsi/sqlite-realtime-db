@@ -108,6 +108,7 @@
       padding: 3px 8px;
       color: white;
       font-size: 0.9em;
+      margin-right: 10px;
     }
 
     .post {
@@ -139,6 +140,11 @@
       margin-top: 10px;
       font-size: 0.9em;
     }
+
+    h5 {
+      margin-bottom: 5px;
+      margin-top: 15px;
+    }
   </style>
 </head>
 
@@ -153,8 +159,7 @@
     </div>
 
     <p>A simple, high-performance real-time database layer on top of SQLite. All REST API endpoints are prefixed with
-      <code>/db</code>.
-    </p>
+      <code>/db</code>.</p>
 
     <h2>System Health</h2>
     <div class="endpoint">
@@ -165,84 +170,210 @@
       <pre><code>{ "status": "ok", "database": "connected" }</code></pre>
     </div>
 
-    <h2>REST API</h2>
+    <h2>Collections & Schema</h2>
 
-    <h3>Collections</h3>
     <div class="endpoint">
       <h4><span class="method get">GET</span> <code>/db/collections</code></h4>
-      <p>Lists all user-created collections.</p>
+      <p>Lists all user-created collections and their schema definitions.</p>
       <pre><code>curl http://localhost:17050/db/collections</code></pre>
+      <p><strong>Success Response:</strong></p>
+      <pre><code>[
+  {
+    "name": "orders",
+    "schema": [
+      { "name": "total", "type": "int" },
+      { "name": "status", "type": "text" }
+    ]
+  },
+  {
+    "name": "users",
+    "schema": []
+  }
+]</code></pre>
     </div>
+
     <div class="endpoint">
       <h4><span class="method get">GET</span> <code>/db/collections/{collectionName}</code></h4>
-      <p>Lists all user-created collections.</p>
-      <pre><code>curl http://localhost:17050/db/collections/{collectionName}</code></pre>
+      <p>Retrieves the schema definition for a specific collection.</p>
+      <pre><code>curl http://localhost:17050/db/collections/orders</code></pre>
+      <p><strong>Success Response:</strong></p>
+      <pre><code>{
+  "name": "orders",
+  "schema": [
+    { "name": "total", "type": "int" },
+    { "name": "status", "type": "text" }
+  ]
+}</code></pre>
     </div>
+
     <div class="endpoint">
-      <h4><span class="method post">POST</span> <code>/db/collections/{collectionName}</code></h4>
-      <p>Creates a new collection with a defined schema for high-performance columns. Fields not in the schema are
-        stored in the JSON.</p>
+      <h4><span class="method post">POST</span> <code>/db/collections</code></h4>
+      <p>Creates a new collection with an optional typed schema. Fields defined here become native SQL columns for
+        performance. Other fields go into the JSON blob.</p>
       <p><strong>Supported Types:</strong> <code>text</code>, <code>int</code>, <code>float</code>, <code>bool</code>,
-        <code>datetime</code>.
-      </p>
-      <pre><code>curl -X POST http://localhost:17050/db/collections/{collectionName} \
+        <code>datetime</code>.</p>
+      <pre><code>curl -X POST http://localhost:17050/db/collections \
   -H "Content-Type: application/json" \
   -d '{
+    "name": "orders",
     "schema": [
         { "name": "status", "type": "text", "required": true },
         { "name": "total", "type": "int" },
-        { "name": "region", "type": "text" }
+        { "name": "created_at", "type": "datetime" }
     ]
   }'</code></pre>
+      <p><strong>Success Response:</strong></p>
+      <pre><code>{ "status": "created", "collection": "orders" }</code></pre>
     </div>
+
+    <div class="endpoint">
+      <h4><span class="method patch">PATCH</span> <code>/db/collections/{collectionName}</code></h4>
+      <p><strong>Schema Migration.</strong> Allows promoting fields (JSON -> Column), demoting fields (Column -> JSON),
+        adding new columns, or deleting columns.</p>
+
+      <h5>Example: Promote 'region' to a column (Extracts existing data)</h5>
+      <pre><code>curl -X PATCH http://localhost:17050/db/collections/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "promote": [
+      { "name": "region", "type": "text" }
+    ]
+  }'</code></pre>
+
+      <h5>Example: Add a new empty column</h5>
+      <pre><code>curl -X PATCH http://localhost:17050/db/collections/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "add": [
+      { "name": "priority", "type": "int" }
+    ]
+  }'</code></pre>
+
+      <h5>Example: Demote 'total' back to JSON blob</h5>
+      <pre><code>curl -X PATCH http://localhost:17050/db/collections/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "demote": ["total"]
+  }'</code></pre>
+
+      <h5>Example: Delete 'legacy_field' column permanently</h5>
+      <pre><code>curl -X PATCH http://localhost:17050/db/collections/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "delete": ["legacy_field"]
+  }'</code></pre>
+
+      <p><strong>Success Response:</strong></p>
+      <pre><code>{
+  "status": "updated",
+  "collection": "orders",
+  "schema": [...] // New schema
+}</code></pre>
+    </div>
+
     <div class="endpoint">
       <h4><span class="method delete">DELETE</span> <code>/db/collections/{collectionName}</code></h4>
-      <p>Deletes a collection and all its data.</p>
-      <pre><code>curl -X DELETE http://localhost:17050/db/collections/{collectionName}'</code></pre>
+      <p>Deletes a collection and all its data permanently.</p>
+      <pre><code>curl -X DELETE http://localhost:17050/db/collections/orders</code></pre>
+      <p><strong>Success Response:</strong></p>
+      <pre><code>{ "status": "deleted" }</code></pre>
     </div>
 
     <h3>Indexes</h3>
     <div class="endpoint">
       <h4><span class="method post">POST</span> <code>/db/indexes/{collectionName}</code></h4>
-      <p>Creates an index on a field. If the field is in the schema, it uses a native SQL index. If not, it uses a JSON
+      <p>Creates an index. If the field is in the schema, it uses a native SQL index. If not, it creates a JSON
         expression index.</p>
-      <pre><code>curl -X POST http://localhost:17050/db/indexes/realtime_order_demo \
-  -d '{"name": "idx_total", "fields": ["total"]}'</code></pre>
+      <pre><code>curl -X POST http://localhost:17050/db/indexes/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "idx_total",
+    "fields": ["total"],
+    "unique": false
+  }'</code></pre>
+      <p><strong>Success Response:</strong></p>
+      <pre><code>{ "status": "created", "index": { ... } }</code></pre>
     </div>
 
-    <h3>Documents</h3>
+    <h2>Documents (CRUD)</h2>
+
     <div class="endpoint">
-      <h4><span class="method put">PUT</span> <code>/db/data/{collectionName}/{docId}</code></h4>
-      <p>Creates a new document or fully replaces an existing one (Upsert).</p>
-      <pre><code>curl -X PUT http://localhost:17050/db/data/realtime_order_demo/ord_100 \
-  -d '{"status": "pending", "total": 150, "region": "US", "customer_note": "urgent"}'</code></pre>
+      <h4><span class="method put">PUT</span> <code>/db/data/{collection}/{docId}</code></h4>
+      <p><strong>Upsert.</strong> Creates a new document or fully replaces an existing one. Any field not included in
+        the payload will be lost.</p>
+      <pre><code>curl -X PUT http://localhost:17050/db/data/orders/ord_100 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "status": "pending",
+    "total": 150,
+    "region": "US",
+    "notes": "urgent delivery"
+  }'</code></pre>
+      <p><strong>Success Response:</strong></p>
+      <pre><code>{ "status": "replaced", "id": "ord_100", "operation": "INSERT" }</code></pre>
     </div>
+
     <div class="endpoint">
-      <h4><span class="method get">GET</span> <code>/db/data/{collectionName}/{docId}</code></h4>
-      <p>Retrieves a single document.</p>
-      <pre><code>curl http://localhost:17050/db/data/realtime_order_demo/ord_100</code></pre>
+      <h4><span class="method patch">PATCH</span> <code>/db/data/{collection}/{docId}</code></h4>
+      <p><strong>Partial Update.</strong> Merges new fields into the existing document (RFC 7396 Merge Patch).</p>
+      <pre><code>curl -X PATCH http://localhost:17050/db/data/orders/ord_100 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "status": "shipped", 
+    "shippedAt": "2025-10-01T12:00:00Z"
+  }'</code></pre>
+      <p><strong>Success Response:</strong></p>
+      <pre><code>{ "status": "patched", "id": "ord_100" }</code></pre>
     </div>
+
     <div class="endpoint">
-      <h4><span class="method patch">PATCH</span> <code>/db/data/{collectionName}/{docId}</code></h4>
-      <p>Partially updates a document using JSON Patch (RFC 7396).</p>
-      <pre><code>curl -X PATCH http://localhost:17050/db/data/realtime_order_demo/ord_100 \
-  -d '{"status": "shipped", "shippedAt": "2025-10-01T12:00:00Z"}'</code></pre>
+      <h4><span class="method get">GET</span> <code>/db/data/{collection}/{docId}</code></h4>
+      <p>Retrieves a single document. Reconstructs the full JSON from columns + blob.</p>
+      <pre><code>curl http://localhost:17050/db/data/orders/ord_100</code></pre>
+      <p><strong>Success Response:</strong></p>
+      <pre><code>{
+  "id": "ord_100",
+  "status": "shipped",
+  "total": 150,
+  "region": "US",
+  "notes": "urgent delivery",
+  "shippedAt": "2025-10-01T12:00:00Z"
+}</code></pre>
     </div>
+
     <div class="endpoint">
-      <h4><span class="method delete">DELETE</span> <code>/db/data/{collectionName}/{docId}</code></h4>
+      <h4><span class="method delete">DELETE</span> <code>/db/data/{collection}/{docId}</code></h4>
       <p>Deletes a document.</p>
-      <pre><code>curl -X DELETE http://localhost:17050/db/data/realtime_order_demo/ord_100</code></pre>
+      <pre><code>curl -X DELETE http://localhost:17050/db/data/orders/ord_100</code></pre>
+      <p><strong>Success Response:</strong></p>
+      <pre><code>{ "status": "deleted", "id": "ord_100" }</code></pre>
     </div>
 
-    <h3>Querying</h3>
+    <div class="endpoint">
+      <h4><span class="method post">POST</span> <code>/db/batch</code></h4>
+      <p><strong>Bulk Operations.</strong> Execute multiple PUT, PATCH, or DELETE operations in a single atomic
+        transaction. Highly recommended for bulk imports.</p>
+      <pre><code>curl -X POST http://localhost:17050/db/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operations": [
+      { "method": "PUT", "collection": "orders", "docId": "ord_1", "data": {"total": 100} },
+      { "method": "PATCH", "collection": "orders", "docId": "ord_2", "data": {"status": "done"} },
+      { "method": "DELETE", "collection": "orders", "docId": "ord_3" }
+    ]
+  }'</code></pre>
+      <p><strong>Success Response:</strong></p>
+      <pre><code>{ "status": "success", "count": 3 }</code></pre>
+    </div>
+
+    <h2>Querying</h2>
     <div class="endpoint">
       <h4><span class="method post">POST</span> <code>/db/query/{collectionName}</code></h4>
       <p>Executes a read-only query. Returns an array of document wrappers <code>{ id, data }</code>.</p>
 
-      <h5>Example: VIP Orders (Complex Logic)</h5>
-      <p>Find orders where Region is 'EU' <strong>AND</strong> Total is greater than 100, sorted by Total descending.
-      </p>
-      <pre><code>curl -X POST http://localhost:17050/db/query/realtime_order_demo \
+      <h5>Example: Find VIP Orders</h5>
+      <p>Find orders where Region is 'EU' <strong>AND</strong> Total > 100, sorted by Total.</p>
+      <pre><code>curl -X POST http://localhost:17050/db/query/orders \
   -H "Content-Type: application/json" \
   -d '{
     "where": {
@@ -270,42 +401,29 @@
 ]</code></pre>
     </div>
 
-    <h2>WebSocket API (Real-Time Subscriptions)</h2>
+    <h2>WebSocket API</h2>
     <p>Connect to <code>ws://localhost:17050/ws</code> to receive live updates.</p>
+
+    <h3>Protocol Details (JSON Stream)</h3>
+    <p>To maximize performance, the server utilizes a <strong>JSON Stream</strong> protocol.</p>
     <div class="note">
-      <strong>Client Library:</strong> A JavaScript client library is available at <code>/realtime.js</code>. It handles
-      reconnection, query syncing, and state management automatically.
+      <strong>Important:</strong> A single WebSocket message frame may contain <strong>multiple JSON objects</strong>
+      separated by the <strong>ASCII Record Separator (<code>\x1e</code>)</strong> character.<br>
+      Clients must split the frame data by this delimiter (not newline) to parse individual JSON objects safely,
+      preventing issues if the JSON data itself contains newlines.
     </div>
+    <pre><code>// Raw Frame Content Example (Using RS delimiter)
+{"type": "realtime_update", ...}\x1e{"type": "realtime_update", ...}</code></pre>
 
     <h3>Message Format</h3>
     <p>Send: <code>{"type": "subscribe", "subscription": {...}}</code></p>
 
-    <h4>1. Subscribe to Collection (Audit Log)</h4>
-    <pre><code>{
-  "type": "subscribe",
-  "subscription": {
-    "subscriptionId": "sub-1",
-    "collection": "realtime_order_demo"
-  }
-}</code></pre>
-
-    <h4>2. Subscribe to Single Document (Tracker)</h4>
-    <pre><code>{
-  "type": "subscribe",
-  "subscription": {
-    "subscriptionId": "sub-2",
-    "collection": "realtime_order_demo",
-    "docId": "ord_100"
-  }
-}</code></pre>
-
-    <h4>3. Subscribe with Query (Live Dashboard)</h4>
-    <p>Get live updates for 'pending' orders.</p>
+    <h4>Subscribe with Query (Live Dashboard)</h4>
     <pre><code>{
   "type": "subscribe",
   "subscription": {
     "subscriptionId": "sub-3",
-    "collection": "realtime_order_demo",
+    "collection": "orders",
     "query": {
       "where": {
         "field": "status",
@@ -317,33 +435,48 @@
 }</code></pre>
 
     <h3>Server Events</h3>
-    <p>The server sends the following event types:</p>
-    <ul>
-      <li><code>initial_data_batch</code>: Existing data sent immediately after subscribing.</li>
-      <li><code>initial_data_complete</code>: Signals end of history.</li>
-      <li><code>realtime_update</code>: A live change happened.</li>
-    </ul>
+    <p>The server sends the following JSON payloads over the socket.</p>
 
-    <h4>Real-Time Update Payload</h4>
+    <h5>1. Acknowledgment</h5>
+    <p>Sent immediately after subscribing. Provides the internal Topic ID used for routing.</p>
+    <pre><code>{
+  "type": "subscribe_ack",
+  "subscriptionId": "sub-3",
+  "topic": "query:orders:4139481239"
+}</code></pre>
+
+    <h5>2. Initial Data Batch</h5>
+    <p>A chunk of existing data matching your query. Sent sequentially.</p>
+    <pre><code>{
+  "type": "initial_data_batch",
+  "subscriptionId": "sub-3",
+  "collection": "orders",
+  "documents": [
+    { "id": "ord_1", "data": { ... } },
+    { "id": "ord_2", "data": { ... } }
+  ]
+}</code></pre>
+
+    <h5>3. Initial Data Complete</h5>
+    <p>Signals that all existing data has been sent. Live updates begin after this.</p>
+    <pre><code>{
+  "type": "initial_data_complete",
+  "subscriptionId": "sub-3",
+  "collection": "orders"
+}</code></pre>
+
+    <h5>4. Real-Time Update</h5>
+    <p>A live change event. Grouped by <code>topic</code> for efficiency.</p>
     <pre><code>{
   "type": "realtime_update",
+  "topic": "query:orders:4139481239",
   "payload": {
-    "operation": "INSERT",  // Options: INSERT, UPDATE, DELETE, REMOVE
-    "collection": "realtime_order_demo",
+    "operation": "INSERT", // INSERT, UPDATE, DELETE, REMOVE
+    "collection": "orders",
     "docId": "ord_999",
     "data": { "status": "pending", "total": 50 }
   }
 }</code></pre>
-
-    <div class="note">
-      <strong>Understanding <code>REMOVE</code> vs <code>DELETE</code>:</strong><br>
-      <ul>
-        <li><strong>DELETE:</strong> The document was permanently deleted from the database.</li>
-        <li><strong>REMOVE:</strong> The document still exists, but it was updated such that it <strong>no longer
-            matches your query</strong> (e.g., status changed from 'pending' to 'shipped'). It should be removed from
-          the client's view.</li>
-      </ul>
-    </div>
 
   </div>
 </body>

@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 
@@ -51,6 +52,22 @@ func main() {
 		port = uint16(val64)
 	}
 
+	// 4. MultiHub Shard Configuration
+	// Use CPU cores for parallelism, but enforce a minimum of 8 to reduce lock contention on small VMs.
+	numShards := uint32(max(runtime.NumCPU(), 8))
+
+	// Allow override via environment variable
+	strShards := os.Getenv("HUB_SHARDS")
+	if strShards != "" {
+		val64, err := strconv.ParseUint(strShards, 10, 32)
+		if err != nil || val64 == 0 {
+			fmt.Printf("Invalid HUB_SHARDS '%s', defaulting to %d\n", strShards, numShards)
+		} else {
+			numShards = uint32(val64)
+		}
+	}
+
 	// 4. Start Server
-	realtime.Server(db, host, port)
+	fmt.Printf("Starting server on %s:%d with %d Hub Shards...\n", host, port, numShards)
+	realtime.Server(db, host, port, numShards)
 }

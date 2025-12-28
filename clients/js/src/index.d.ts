@@ -268,12 +268,12 @@ export class Subscription<T = any> {
    * Registers a callback for **raw** messages on this subscription.
    * Useful for debugging or custom handling of specific message types.
    */
-  on(callback: (message: ServerMessage<T>) => void): this;
+  on(callback: (message: Readonly<ServerMessage<T>>) => void): this;
 
   /**
    * Unregisters a specific raw message callback.
    */
-  off(callback: (message: ServerMessage<T>) => void): this;
+  off(callback: (message: Readonly<ServerMessage<T>>) => void): this;
 
   /**
    * Registers a callback specifically for subscription errors.
@@ -296,8 +296,8 @@ export class Subscription<T = any> {
    */
   subscribeToData(
     callback: (
-      list: LocalDocument<T>[],
-      map: Map<string, LocalDocument<T>>,
+      list: ReadonlyArray<LocalDocument<T>>,
+      map: ReadonlyMap<string, LocalDocument<T>>,
       isLoading: boolean
     ) => void
   ): () => void;
